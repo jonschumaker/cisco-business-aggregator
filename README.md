@@ -56,7 +56,29 @@ The `.env` file is ignored by git to ensure your API keys are not committed to v
 
 ## Usage
 
-### Running the Research Agent
+### Company URL Finder Tool
+
+You can use our new interactive tool to quickly search for a specific company and generate a report:
+
+```bash
+python company_url_finder.py
+```
+
+This script will:
+1. Prompt you to enter a company name
+2. Search for the company's official website using Tavily
+3. Ask you to verify the URL (or provide the correct one)
+4. Search for the URL in the database to find the matching SAVM ID
+5. Check if an existing report is available (within the last 30 days)
+6. Either display links to existing reports or generate a new one
+
+This is the recommended way to research a single company quickly, as it provides:
+- Interactive verification to ensure the correct URL is used
+- Intelligent URL matching between search results and database entries
+- Access to existing reports without unnecessary regeneration
+- Direct links to all report formats (Markdown, Word, JSON)
+
+### Running the Full Research Agent
 
 Run the research agent to process all customers from the Excel file:
 
