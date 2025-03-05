@@ -24,6 +24,7 @@ tqdm>=4.62.0     # For progress bars
 
 # For cloud storage (if used)
 google-cloud-storage>=2.0.0
+google-auth>=2.0.0
 
 # For regex and text processing
 regex>=2021.8.3 

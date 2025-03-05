@@ -15,6 +15,11 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 import time  # Add time module for sleep between retries
 import re
 import docx
+from google.cloud import storage
+from google.oauth2 import service_account
+import datetime as dt  # Rename datetime module import to dt
+import tempfile  # Add tempfile module for temporary file handling
+import shutil  # For file operations
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +36,9 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
+# Set up Google Cloud Storage credentials path
+CREDENTIALS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "google-credentials-dev.json")
+
 # Check if API keys are available
 if not OPENAI_API_KEY:
     logger.error("OPENAI_API_KEY not found in environment variables. Please add it to your .env file.")
@@ -43,10 +51,56 @@ if not TAVILY_API_KEY:
 # Set environment variables for libraries that need them
 os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 
-# Create reports directory if it doesn't exist
-REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
-os.makedirs(REPORTS_DIR, exist_ok=True)
+# Function to get a temporary directory for storing files before uploading to GCS
+def get_temp_dir():
+    """Create and return a temporary directory for storing files before uploading to GCS."""
+    return tempfile.mkdtemp(prefix="news_reports_")
+
+# Set up Google Cloud Storage
+# Get bucket path from environment variables
+GCS_BUCKET_PATH = os.getenv("OUTCOMES_PATH", "gs://sales-ai-dev-outcomes-6f1ce1c")
+# Extract bucket name from the path (remove gs:// prefix)
+GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
+GCS_FOLDER = "news-reports"
+
+def get_gcs_client():
+    """Get authenticated Google Cloud Storage client."""
+    try:
+        credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+        return storage.Client(credentials=credentials)
+    except Exception as e:
+        logger.error(f"Error initializing GCS client: {str(e)}")
+        return None
+
+def upload_to_gcs(local_file_path, gcs_destination_path):
+    """Upload a file to Google Cloud Storage."""
+    try:
+        client = get_gcs_client()
+        if not client:
+            logger.error("Failed to initialize GCS client")
+            return None
+            
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(gcs_destination_path)
+        
+        logger.info(f"Uploading file from {local_file_path} to GCS: gs://{GCS_BUCKET_NAME}/{gcs_destination_path}")
+        blob.upload_from_filename(local_file_path)
+        
+        # Generate a signed URL that expires in 7 days
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=dt.timedelta(days=7),
+            method="GET"
+        )
+        
+        logger.info(f"File successfully uploaded to GCS: gs://{GCS_BUCKET_NAME}/{gcs_destination_path}")
+        logger.info(f"Generated signed URL (expires in 7 days): {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Error uploading to GCS: {str(e)}")
+        return None
 
 from langgraph.checkpoint.memory import MemorySaver
 from open_deep_research.graph import builder
@@ -156,10 +210,12 @@ def standardize_sources_in_markdown(markdown_content: str) -> str:
     return '\n'.join(result_lines)
 
 def save_markdown_report(url: str, content: str, topic: str, customer_name: str = None, customer_metadata: dict = None):
-    """Save the research report as a Markdown file and convert to Word document."""
+    """Save the research report as a Markdown file and convert to Word document, then upload to GCS."""
+    temp_dir = None
     try:
-        # Ensure reports directory exists
-        os.makedirs(REPORTS_DIR, exist_ok=True)
+        # Create a temporary directory for storing files before uploading to GCS
+        temp_dir = get_temp_dir()
+        logger.info(f"Created temporary directory: {temp_dir}")
         
         # Create a filename based on the customer name or URL
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -177,8 +233,8 @@ def save_markdown_report(url: str, content: str, topic: str, customer_name: str 
                 domain = domain[4:]  # Remove 'www.' prefix
             base_filename = f"OUTCOMES_{domain}_{timestamp}"
         
-        # Markdown file path
-        md_file_path = os.path.join(REPORTS_DIR, f"{base_filename}.md")
+        # Markdown file path (temporary storage)
+        md_file_path = os.path.join(temp_dir, f"{base_filename}.md")
         
         # Create markdown content with a more specific introduction
         company_name = extract_company_name(url, customer_name)
@@ -198,37 +254,82 @@ def save_markdown_report(url: str, content: str, topic: str, customer_name: str 
         # Standardize source formatting in the markdown content
         markdown_content = standardize_sources_in_markdown(markdown_content)
         
-        # Save the markdown file
+        # Save the markdown file to temporary directory
         with open(md_file_path, 'w', encoding='utf-8') as f:
             f.write(markdown_content)
         
-        logger.info(f"Markdown report saved to: {md_file_path}")
+        logger.info(f"Markdown report saved to temporary file: {md_file_path}")
         
-        # Save the JSON version with chunked sections
-        json_file_path = os.path.join(REPORTS_DIR, f"{base_filename}.json")
+        # Save the JSON version with chunked sections to temporary directory
+        json_file_path = os.path.join(temp_dir, f"{base_filename}.json")
         save_json_report(markdown_content, json_file_path, url, topic, customer_name, company_name, customer_metadata)
-        logger.info(f"JSON report saved to: {json_file_path}")
+        logger.info(f"JSON report saved to temporary file: {json_file_path}")
         
-        # Convert to Word document
+        # Convert to Word document in temporary directory
+        docx_file_path = os.path.join(temp_dir, f"{base_filename}.docx")
         try:
-            docx_file_path = os.path.join(REPORTS_DIR, f"{base_filename}.docx")
             markdown_to_word(markdown_content, docx_file_path, customer_name or url)
-            logger.info(f"Word document saved to: {docx_file_path}")
-            
-            return {
-                "markdown_path": md_file_path,
-                "json_path": json_file_path,
-                "docx_path": docx_file_path
-            }
+            logger.info(f"Word document saved to temporary file: {docx_file_path}")
         except Exception as e:
             logger.error(f"Error converting to Word: {str(e)}")
-            return {
-                "markdown_path": md_file_path,
-                "json_path": json_file_path
-            }
+            docx_file_path = None
+        
+        # Upload files to Google Cloud Storage
+        result = {}
+        upload_success = False
+        
+        # Upload markdown file to GCS
+        if os.path.exists(md_file_path):
+            gcs_md_path = f"{GCS_FOLDER}/{base_filename}.md"
+            md_url = upload_to_gcs(md_file_path, gcs_md_path)
+            if md_url:
+                result["markdown_gcs_url"] = md_url
+                upload_success = True
+            else:
+                logger.error(f"Failed to upload markdown file to GCS: {md_file_path}")
+        else:
+            logger.error(f"Markdown file does not exist: {md_file_path}")
+            
+        # Upload JSON file to GCS
+        if os.path.exists(json_file_path):
+            gcs_json_path = f"{GCS_FOLDER}/{base_filename}.json"
+            json_url = upload_to_gcs(json_file_path, gcs_json_path)
+            if json_url:
+                result["json_gcs_url"] = json_url
+                upload_success = True
+            else:
+                logger.error(f"Failed to upload JSON file to GCS: {json_file_path}")
+        else:
+            logger.error(f"JSON file does not exist: {json_file_path}")
+            
+        # Upload Word document to GCS if available
+        if docx_file_path and os.path.exists(docx_file_path):
+            gcs_docx_path = f"{GCS_FOLDER}/{base_filename}.docx"
+            docx_url = upload_to_gcs(docx_file_path, gcs_docx_path)
+            if docx_url:
+                result["docx_gcs_url"] = docx_url
+                upload_success = True
+            else:
+                logger.error(f"Failed to upload Word document to GCS: {docx_file_path}")
+        elif docx_file_path:
+            logger.error(f"Word document does not exist: {docx_file_path}")
+        
+        if not upload_success:
+            logger.error("No files were successfully uploaded to GCS")
+            return None
+            
+        return result
     except Exception as e:
-        logger.error(f"Error saving markdown report: {str(e)}")
+        logger.error(f"Error saving and uploading report: {str(e)}")
         return None
+    finally:
+        # Clean up temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+            except Exception as e:
+                logger.error(f"Error cleaning up temporary directory: {str(e)}")
 
 def save_json_report(markdown_content: str, output_path: str, url: str, topic: str, 
                     customer_name: str = None, company_name: str = None, customer_metadata: dict = None):
@@ -321,7 +422,7 @@ def save_json_report(markdown_content: str, output_path: str, url: str, topic: s
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(json_data, f, indent=2, ensure_ascii=False)
     
-    logger.info(f"Simple JSON report saved to: {output_path}")
+    logger.info(f"Simple JSON report saved to temporary file: {output_path}")
     return output_path
 
 def markdown_to_word(markdown_content: str, output_path: str, title: str):
@@ -954,13 +1055,20 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
                 customer_metadata=customer_metadata
             )
             
-            logger.error(f"   Error report saved to: {file_paths['markdown_path']}")
-            logger.error(f"   Word document saved to: {file_paths['docx_path']}")
-            
-            if 'json_path' in file_paths:
-                logger.error(f"   JSON report saved to: {file_paths['json_path']}")
-            
-            return file_paths
+            if file_paths:
+                if 'markdown_gcs_url' in file_paths:
+                    logger.error(f"   Error report saved to: {file_paths['markdown_gcs_url']}")
+                
+                if 'docx_gcs_url' in file_paths:
+                    logger.error(f"   Word document saved to: {file_paths['docx_gcs_url']}")
+                
+                if 'json_gcs_url' in file_paths:
+                    logger.error(f"   JSON report saved to: {file_paths['json_gcs_url']}")
+                
+                return file_paths
+            else:
+                logger.error(f"Failed to save and upload error report for {customer_name or url}")
+                return None
         except Exception as save_error:
             logger.error(f"   Could not save error report: {str(save_error)}")
             return None
@@ -975,14 +1083,22 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
             customer_metadata=customer_metadata
         )
         
-        logger.info(f"✅ Research completed for {customer_name or url}")
-        logger.info(f"   Markdown report saved to: {file_paths['markdown_path']}")
-        logger.info(f"   Word document saved to: {file_paths['docx_path']}")
-        
-        if 'json_path' in file_paths:
-            logger.info(f"   JSON report saved to: {file_paths['json_path']}")
-        
-        return file_paths
+        if file_paths:
+            logger.info(f"✅ Research completed for {customer_name or url}")
+            
+            if 'markdown_gcs_url' in file_paths:
+                logger.info(f"   Markdown report saved to: {file_paths['markdown_gcs_url']}")
+            
+            if 'docx_gcs_url' in file_paths:
+                logger.info(f"   Word document saved to: {file_paths['docx_gcs_url']}")
+            
+            if 'json_gcs_url' in file_paths:
+                logger.info(f"   JSON report saved to: {file_paths['json_gcs_url']}")
+            
+            return file_paths
+        else:
+            logger.error(f"Failed to save and upload report for {customer_name or url}")
+            return None
     else:
         logger.warning(f"⚠️ No report content was generated for {customer_name or url}")
         logger.warning(f"   Total lookback period: {tavily_days_back} days")
@@ -992,20 +1108,10 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
         simple_report += f"## URL: {url}\n\n"
         simple_report += f"# Introduction\n\n"
         simple_report += f"This report was intended to focus specifically on {company_name}, analyzing recent news about the company's operations, "
-        simple_report += f"strategic initiatives, and IT priorities with emphasis on their specific IT challenges, pain points, and desired outcomes.\n\n"
-        simple_report += f"## Limited Information Available\n\n"
-        simple_report += f"No detailed information specific to {company_name}'s IT challenges, pain points, or desired outcomes was found during the research process, "
-        simple_report += f"even after extending the search to include information from the past {tavily_days_back} days.\n\n"
-        simple_report += "This could be due to:\n"
-        simple_report += f"- Limited public information available about {company_name}'s IT initiatives\n"
-        simple_report += "- The company may not have recently disclosed their IT priorities or challenges\n"
-        simple_report += "- Technical limitations in the research process\n\n"
-        simple_report += "Consider direct engagement with the company for more specific information about their IT priorities."
-        
-        # Add generic discovery questions section for when limited information is found
-        simple_report += f"\n\n## Discovery Questions for Cisco Sellers\n\n"
-        simple_report += f"Since limited specific information was found about {company_name}'s IT initiatives, here are some general discovery questions that could help uncover their needs:\n\n"
-        simple_report += f"1. **Current Infrastructure Assessment**: \"What are the biggest challenges you're currently facing with your IT infrastructure at {company_name}?\"\n\n"
+        simple_report += f"strategic initiatives, and IT priorities. However, no significant recent news was found within the specified lookback period of {tavily_days_back} days.\n\n"
+        simple_report += f"# Discovery Questions for {company_name}\n\n"
+        simple_report += f"Despite the lack of recent news, here are some general discovery questions that might help initiate conversations with {company_name}:\n\n"
+        simple_report += f"1. **Current IT Infrastructure**: \"Can you tell me about your current IT infrastructure and any challenges you're facing?\"\n\n"
         simple_report += f"2. **Digital Transformation**: \"Is {company_name} currently undertaking or planning any digital transformation initiatives? What are your key priorities?\"\n\n"
         simple_report += f"3. **Security Concerns**: \"How is {company_name} addressing cybersecurity challenges in today's increasingly complex threat landscape?\"\n\n"
         simple_report += f"4. **Network Reliability**: \"How satisfied are you with the performance and reliability of your current network infrastructure?\"\n\n"
@@ -1020,14 +1126,22 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
             customer_metadata=customer_metadata
         )
         
-        logger.info(f"   Created a simple placeholder report instead")
-        logger.info(f"   Markdown report saved to: {file_paths['markdown_path']}")
-        logger.info(f"   Word document saved to: {file_paths['docx_path']}")
-        
-        if 'json_path' in file_paths:
-            logger.info(f"   JSON report saved to: {file_paths['json_path']}")
-        
-        return file_paths
+        if file_paths:
+            logger.info(f"   Created a simple placeholder report instead")
+            
+            if 'markdown_gcs_url' in file_paths:
+                logger.info(f"   Markdown report saved to: {file_paths['markdown_gcs_url']}")
+            
+            if 'docx_gcs_url' in file_paths:
+                logger.info(f"   Word document saved to: {file_paths['docx_gcs_url']}")
+            
+            if 'json_gcs_url' in file_paths:
+                logger.info(f"   JSON report saved to: {file_paths['json_gcs_url']}")
+            
+            return file_paths
+        else:
+            logger.error(f"Failed to save and upload placeholder report for {customer_name or url}")
+            return None
 
 def load_customer_data():
     """Load customer data from Excel file and filter for valid websites and Heartland-Gulf."""
@@ -1165,13 +1279,23 @@ async def main():
                             customer_metadata=customer_metadata
                         )
                         
-                        logger.error(f"   Error report saved to: {file_paths['markdown_path']}")
-                        logger.error(f"   Word document saved to: {file_paths['docx_path']}")
-                        
-                        if 'json_path' in file_paths:
-                            logger.error(f"   JSON report saved to: {file_paths['json_path']}")
+                        if file_paths:
+                            if 'markdown_gcs_url' in file_paths:
+                                logger.error(f"   Error report saved to: {file_paths['markdown_gcs_url']}")
+                            
+                            if 'docx_gcs_url' in file_paths:
+                                logger.error(f"   Word document saved to: {file_paths['docx_gcs_url']}")
+                            
+                            if 'json_gcs_url' in file_paths:
+                                logger.error(f"   JSON report saved to: {file_paths['json_gcs_url']}")
+                            
+                            return file_paths
+                        else:
+                            logger.error(f"Failed to save and upload error report for {customer_name or url}")
+                            return None
                     except Exception as save_error:
                         logger.error(f"   Could not save error report: {str(save_error)}")
+                        return None
                 except Exception as report_error:
                     logger.error(f"   Could not create error report: {str(report_error)}")
     
@@ -1179,11 +1303,6 @@ async def main():
     logger.info("\nAll research tasks completed!")
 
 if __name__ == "__main__":
-    # Set up the reports directory
-    REPORTS_DIR = os.path.join(os.getcwd(), "reports")
-    os.makedirs(REPORTS_DIR, exist_ok=True)
-    
-    logger.info(f"Reports will be saved to: {REPORTS_DIR}")
     logger.info("Starting research process...")
     
     try:
