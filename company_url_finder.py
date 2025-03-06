@@ -28,7 +28,9 @@ from research_agent import (
     process_url, 
     load_customer_data, 
     get_gcs_client, 
-    extract_company_name
+    extract_company_name,
+    download_from_gcs,
+    get_temp_dir
 )
 
 # Configure logging
@@ -395,11 +397,34 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
                                            or (None, None) if not found.
     """
     try:
-        # Load the customer data from Excel
-        excel_path = "Customer Parquet top 80 select hierarchy for test.xlsx"
+        # First, check if we need to download the Excel file from GCS
+        excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
+        excel_path = excel_filename
+        
+        # Check if we should try to download the latest version from GCS
+        use_gcs_file = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
+        
+        if use_gcs_file:
+            # Path in GCS for the latest Excel file
+            gcs_excel_path = "customer-data/Customer Parquet top 80 select hierarchy for test_latest.xlsx"
+            
+            # Temporary local path for the downloaded file
+            temp_dir = get_temp_dir()
+            local_excel_path = os.path.join(temp_dir, excel_filename)
+            
+            # Try to download the file
+            download_success = download_from_gcs(gcs_excel_path, local_excel_path)
+            
+            if download_success:
+                excel_path = local_excel_path
+                logger.info(f"Using Excel file downloaded from GCS: {excel_path}")
+            else:
+                logger.warning("Failed to download Excel file from GCS, falling back to local file")
+        
+        # Load the Excel file
         df = pd.read_excel(excel_path)
         
-        logger.info(f"Loaded {len(df)} rows from Excel file")
+        logger.info(f"Loaded {len(df)} rows from Excel file: {excel_path}")
         
         # Filter for valid websites (not blank or ".")
         df = df[df['WEBSITE'].notna()]  # Remove NaN values

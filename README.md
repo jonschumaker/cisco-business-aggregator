@@ -56,6 +56,26 @@ The `.env` file is ignored by git to ensure your API keys are not committed to v
 
 ## Usage
 
+### Excel File Management
+
+You can upload the customer Excel file to Google Cloud Storage for centralized access:
+
+```bash
+python upload_excel_to_gcs.py --file "Customer Parquet top 80 select hierarchy for test.xlsx"
+```
+
+This script will:
+1. Upload the Excel file to GCS with a timestamp in the filename
+2. Also create a "latest" version that can be accessed by all tools
+3. Return URLs for both the timestamped and latest versions
+
+To use the cloud-stored Excel file instead of a local copy, set in your .env file:
+```
+USE_GCS_EXCEL=true
+```
+
+This ensures all tools use the same, centralized customer data source.
+
 ### Company URL Finder Tool
 
 You can use our new interactive tool to quickly search for a specific company and generate a report:

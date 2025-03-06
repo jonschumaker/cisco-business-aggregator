@@ -74,6 +74,30 @@ def get_gcs_client():
         logger.error(f"Error initializing GCS client: {str(e)}")
         return None
 
+def download_from_gcs(gcs_file_path, local_file_path):
+    """Download a file from Google Cloud Storage."""
+    try:
+        client = get_gcs_client()
+        if not client:
+            logger.error("Failed to initialize GCS client")
+            return False
+            
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(gcs_file_path)
+        
+        if not blob.exists():
+            logger.error(f"File not found in GCS: gs://{GCS_BUCKET_NAME}/{gcs_file_path}")
+            return False
+        
+        logger.info(f"Downloading file from GCS: gs://{GCS_BUCKET_NAME}/{gcs_file_path} to {local_file_path}")
+        blob.download_to_filename(local_file_path)
+        
+        logger.info(f"File successfully downloaded from GCS to {local_file_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error downloading from GCS: {str(e)}")
+        return False
+
 def upload_to_gcs(local_file_path, gcs_destination_path):
     """Upload a file to Google Cloud Storage."""
     try:
@@ -1146,11 +1170,35 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
 def load_customer_data():
     """Load customer data from Excel file and filter for valid websites and Heartland-Gulf."""
     try:
+        # First, check if we need to download the Excel file from GCS
+        excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
+        excel_path = excel_filename
+        
+        # Check if we should try to download the latest version from GCS
+        use_gcs_file = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
+        
+        if use_gcs_file:
+            # Path in GCS for the latest Excel file
+            gcs_excel_path = "customer-data/Customer Parquet top 80 select hierarchy for test_latest.xlsx"
+            
+            # Temporary local path for the downloaded file
+            temp_dir = get_temp_dir()
+            local_excel_path = os.path.join(temp_dir, excel_filename)
+            
+            # Try to download the file
+            download_success = download_from_gcs(gcs_excel_path, local_excel_path)
+            
+            if download_success:
+                excel_path = local_excel_path
+                logger.info(f"Using Excel file downloaded from GCS: {excel_path}")
+            else:
+                logger.warning("Failed to download Excel file from GCS, falling back to local file")
+        
         # Load the Excel file
-        excel_path = "Customer Parquet top 80 select hierarchy for test.xlsx"
         df = pd.read_excel(excel_path)
         
-        logger.info(f"Loaded {len(df)} rows from Excel file")
+        # Log where the data is loaded from
+        logger.info(f"Loaded {len(df)} rows from Excel file: {excel_path}")
         
         # Filter for valid websites (not blank or ".")
         df = df[df['WEBSITE'].notna()]  # Remove NaN values
