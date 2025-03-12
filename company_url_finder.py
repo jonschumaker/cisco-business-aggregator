@@ -14,6 +14,17 @@ from urllib.parse import urlparse
 from google.cloud import storage
 from google.oauth2 import service_account
 
+# Load environment variables from .env file before any other imports
+load_dotenv()
+
+# Set Azure OpenAI environment variables with the correct names
+# This resolves the environment variable name mismatch issue
+os.environ["OPENAI_API_KEY"] = os.getenv("AZURE_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY"))  # Use Azure key for OpenAI
+os.environ["OPENAI_API_VERSION"] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+os.environ["AZURE_OPENAI_API_KEY"] = os.getenv("AZURE_OPENAI_API_KEY")
+os.environ["AZURE_OPENAI_ENDPOINT"] = os.getenv("AZURE_OPENAI_ENDPOINT", "https://phx-sales-ai.openai.azure.com/")
+os.environ["AZURE_DEPLOYMENT_NAME"] = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+
 # Import for Tavily search
 from tavily import TavilyClient
 
@@ -28,9 +39,7 @@ from research_agent import (
     process_url, 
     load_customer_data, 
     get_gcs_client, 
-    extract_company_name,
-    download_from_gcs,
-    get_temp_dir
+    extract_company_name
 )
 
 # Configure logging
@@ -68,6 +77,10 @@ os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 GCS_BUCKET_PATH = os.getenv("OUTCOMES_PATH", "gs://sales-ai-dev-outcomes-6f1ce1c")
 GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
 GCS_FOLDER = "news-reports"
+GCS_EXCEL_FOLDER = "data"  # Folder where Excel files are stored in GCS
+
+# Check if we should use GCS for Excel files
+USE_GCS_EXCEL = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
 
 # Flag to control whether to print links to files
 PRINT_FILE_LINKS = True
@@ -385,6 +398,51 @@ async def verify_url_human_in_loop(company_name: str, url: str) -> str:
         
         return corrected_url
 
+def download_from_gcs(gcs_path, local_path):
+    """
+    Download a file from Google Cloud Storage.
+    
+    Args:
+        gcs_path (str): The path to the file in GCS.
+        local_path (str): The local path where the file should be saved.
+        
+    Returns:
+        bool: True if the download was successful, False otherwise.
+    """
+    try:
+        client = get_gcs_client()
+        if not client:
+            logger.error("Failed to initialize GCS client")
+            return False
+            
+        # Extract the blob path from the full GCS path
+        if gcs_path.startswith("gs://"):
+            # Remove the gs:// prefix and bucket name
+            parts = gcs_path.replace("gs://", "").split("/", 1)
+            if len(parts) < 2:
+                logger.error(f"Invalid GCS path format: {gcs_path}")
+                return False
+            blob_path = parts[1]
+        else:
+            # Assume the path is already a blob path
+            blob_path = gcs_path
+        
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_path)
+        
+        logger.info(f"Downloading file from gs://{GCS_BUCKET_NAME}/{blob_path} to {local_path}")
+        blob.download_to_filename(local_path)
+        
+        if os.path.exists(local_path):
+            logger.info(f"File successfully downloaded to {local_path}")
+            return True
+        else:
+            logger.error(f"File download did not create the expected local file: {local_path}")
+            return False
+    except Exception as e:
+        logger.error(f"Error downloading from GCS: {str(e)}")
+        return False
+
 def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
     """
     Search the database for a URL and return the matching SAVM ID.
@@ -397,34 +455,39 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
                                            or (None, None) if not found.
     """
     try:
-        # First, check if we need to download the Excel file from GCS
+        # Define the Excel file path
         excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
-        excel_path = excel_filename
         
-        # Check if we should try to download the latest version from GCS
-        use_gcs_file = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
-        
-        if use_gcs_file:
-            # Path in GCS for the latest Excel file
-            gcs_excel_path = "customer-data/Customer Parquet top 80 select hierarchy for test_latest.xlsx"
+        if USE_GCS_EXCEL:
+            # If using GCS, download the Excel file from GCS
+            logger.info("Using Excel file from Google Cloud Storage")
             
-            # Temporary local path for the downloaded file
-            temp_dir = get_temp_dir()
+            # Create a temporary directory for the downloaded file
+            import tempfile
+            temp_dir = tempfile.mkdtemp(prefix="company_url_finder_")
             local_excel_path = os.path.join(temp_dir, excel_filename)
             
-            # Try to download the file
+            # GCS path to the Excel file
+            gcs_excel_path = f"{GCS_EXCEL_FOLDER}/{excel_filename}"
+            
+            # Download the file
             download_success = download_from_gcs(gcs_excel_path, local_excel_path)
             
-            if download_success:
-                excel_path = local_excel_path
-                logger.info(f"Using Excel file downloaded from GCS: {excel_path}")
+            if not download_success:
+                logger.error(f"Failed to download Excel file from GCS. Falling back to local file.")
+                # Fall back to the local file
+                excel_path = excel_filename
             else:
-                logger.warning("Failed to download Excel file from GCS, falling back to local file")
+                excel_path = local_excel_path
+        else:
+            # Use the local Excel file
+            excel_path = excel_filename
         
-        # Load the Excel file
+        # Load the customer data from Excel
+        logger.info(f"Loading customer data from: {excel_path}")
         df = pd.read_excel(excel_path)
         
-        logger.info(f"Loaded {len(df)} rows from Excel file: {excel_path}")
+        logger.info(f"Loaded {len(df)} rows from Excel file")
         
         # Filter for valid websites (not blank or ".")
         df = df[df['WEBSITE'].notna()]  # Remove NaN values
@@ -589,6 +652,122 @@ def download_report_from_gcs(file_path: str) -> Dict:
         logger.error(f"Error downloading report from GCS {file_path}: {str(e)}")
         return None
 
+async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, df: pd.DataFrame) -> Tuple[Optional[str], Optional[Dict]]:
+    """
+    Verify the SAVM_ID match with human input.
+    
+    Args:
+        verified_url (str): The verified URL
+        savm_id (str): The matched SAVM ID
+        savm_name (str): The SAVM name with ID
+        df (pd.DataFrame): The dataframe containing customer data
+        
+    Returns:
+        Tuple[Optional[str], Optional[Dict]]: A tuple containing the verified SAVM ID and customer metadata,
+                                           or (None, None) if no match is found.
+    """
+    logger.info(f"Requesting verification for SAVM_ID match: {savm_name} for URL: {verified_url}")
+    print(f"\nI found that this URL: {verified_url} matches with: {savm_name}")
+    print("Is this the correct company? (yes/no)")
+    response = input("> ").lower()
+    
+    if "yes" in response:
+        logger.info(f"User verified SAVM_ID match: {savm_id}")
+        
+        # Get the row with the matching SAVM ID
+        row = df[df['SAVM_NAME_WITH_ID'].str.contains(savm_id, regex=False, na=False)].iloc[0]
+        
+        # Create a metadata dictionary with all available fields
+        metadata = {}
+        for column in df.columns:
+            if pd.notna(row[column]):
+                if isinstance(row[column], (int, float, str, bool)):
+                    metadata[column] = row[column]
+                else:
+                    metadata[column] = str(row[column])
+                    
+        return savm_id, metadata
+    else:
+        logger.info("User indicated SAVM_ID match is incorrect, searching by name instead")
+        print("\nPlease enter the correct company name to search for:")
+        company_name = input("> ")
+        
+        # Search for similar company names in the SAVM_NAME_WITH_ID column
+        name_matches = []
+        
+        # Convert input to lowercase for case-insensitive matching
+        company_name_lower = company_name.lower()
+        
+        # First try exact substring match
+        mask = df['SAVM_NAME_WITH_ID'].fillna("").str.lower().str.contains(company_name_lower, regex=False)
+        name_matches = df[mask]
+        
+        # If no matches, try fuzzy regex matching
+        if len(name_matches) == 0:
+            # Split the company name into tokens and create a regex pattern
+            tokens = company_name_lower.split()
+            if tokens:
+                # Create a pattern that looks for all tokens in any order
+                pattern = '.*'.join(f"({re.escape(token)})" for token in tokens)
+                mask = df['SAVM_NAME_WITH_ID'].fillna("").str.lower().str.contains(pattern, regex=True)
+                name_matches = df[mask]
+        
+        if len(name_matches) > 0:
+            # If multiple matches, let the user choose
+            if len(name_matches) > 1:
+                print("\nMultiple matches found. Please select the correct one:")
+                for i, row in enumerate(name_matches.itertuples()):
+                    print(f"{i+1}. {row.SAVM_NAME_WITH_ID}")
+                
+                try:
+                    selection = int(input("> ")) - 1
+                    if 0 <= selection < len(name_matches):
+                        selected_row = name_matches.iloc[selection]
+                        
+                        # Extract the SAVM ID
+                        match = re.search(r'\(([^)]+)\)', selected_row['SAVM_NAME_WITH_ID'])
+                        if match:
+                            savm_id = match.group(1)
+                            
+                            # Create metadata dictionary
+                            metadata = {}
+                            for column in df.columns:
+                                if pd.notna(selected_row[column]):
+                                    if isinstance(selected_row[column], (int, float, str, bool)):
+                                        metadata[column] = selected_row[column]
+                                    else:
+                                        metadata[column] = str(selected_row[column])
+                                        
+                            logger.info(f"User selected SAVM_ID: {savm_id}")
+                            return savm_id, metadata
+                    else:
+                        logger.warning("Invalid selection.")
+                except (ValueError, IndexError):
+                    logger.warning("Invalid input for selection.")
+            else:
+                # Single match found
+                selected_row = name_matches.iloc[0]
+                
+                # Extract the SAVM ID
+                match = re.search(r'\(([^)]+)\)', selected_row['SAVM_NAME_WITH_ID'])
+                if match:
+                    savm_id = match.group(1)
+                    
+                    # Create metadata dictionary
+                    metadata = {}
+                    for column in df.columns:
+                        if pd.notna(selected_row[column]):
+                            if isinstance(selected_row[column], (int, float, str, bool)):
+                                metadata[column] = selected_row[column]
+                            else:
+                                metadata[column] = str(selected_row[column])
+                                
+                    logger.info(f"Found match by name: {selected_row['SAVM_NAME_WITH_ID']} -> SAVM ID: {savm_id}")
+                    return savm_id, metadata
+        
+        logger.warning(f"No matching company name found for '{company_name}'")
+        return None, None
+
 async def main():
     """Main entry point for the company URL finder."""
     try:
@@ -621,80 +800,133 @@ async def main():
             # Process the URL without SAVM ID
             customer_name = company_name
         else:
-            # We have a SAVM ID, check for existing reports
+            # We have a SAVM ID, but verify it's the correct one
             logger.info(f"Found SAVM ID: {savm_id}")
             customer_name = customer_metadata.get('SAVM_NAME_WITH_ID', company_name)
             
-            # Check for existing reports
-            existing_reports = check_existing_reports(savm_id)
+            # Define the Excel file path
+            excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
             
-            if existing_reports and any(report['is_recent'] for report in existing_reports):
-                # We have a recent report (less than 30 days old)
-                recent_report = next(report for report in existing_reports if report['is_recent'])
-                logger.info(f"Found recent report ({recent_report['age_days']} days old): {recent_report['file_path']}")
+            if USE_GCS_EXCEL:
+                # If using GCS, download the Excel file from GCS
+                logger.info("Using Excel file from Google Cloud Storage")
                 
-                # Download the report
-                report_content = download_report_from_gcs(recent_report['file_path'])
+                # Create a temporary directory for the downloaded file
+                import tempfile
+                temp_dir = tempfile.mkdtemp(prefix="company_url_finder_")
+                local_excel_path = os.path.join(temp_dir, excel_filename)
                 
-                if report_content:
-                    logger.info(f"Successfully downloaded existing report")
-                    
-                    # Display the report summary
-                    logger.info(f"Company: {customer_name}")
-                    logger.info(f"URL: {verified_url}")
-                    logger.info(f"Report Age: {recent_report['age_days']} days")
-                    logger.info(f"Report Path: gs://{GCS_BUCKET_NAME}/{recent_report['file_path']}")
-                    
-                    if 'content' in report_content:
-                        # Extract the first 300 characters of content as a preview
-                        content_preview = report_content['content'][:300] + "..." if len(report_content['content']) > 300 else report_content['content']
-                        logger.info(f"Content Preview:\n{content_preview}")
-                    
-                    # Ask if user wants to generate a new report anyway
-                    print("\nDo you want to generate a new report anyway? (yes/no): ")
-                    regenerate = input("> ").lower() == 'yes'
-                    
-                    if not regenerate:
-                        logger.info("User chose to use existing report")
-                        
-                        # Display all available report formats
-                        print("\n=== Available Report Links ===")
-                        
-                        # Get all files in the bucket
-                        all_files = list_files_in_gcs()
-                        
-                        # Check for related files with the same base name but different extensions
-                        base_path = recent_report['file_path'].rsplit('.', 1)[0]
-                        related_files = [f for f in all_files if f.startswith(base_path)]
-                        
-                        for file in related_files:
-                            file_type = "Unknown"
-                            if file.endswith('.md'):
-                                file_type = "Markdown"
-                            elif file.endswith('.docx'):
-                                file_type = "Word Document"
-                            elif file.endswith('.json'):
-                                file_type = "JSON Data"
-                                
-                            # Generate a signed URL for this file
-                            try:
-                                client = get_gcs_client()
-                                bucket = client.bucket(GCS_BUCKET_NAME)
-                                blob = bucket.blob(file)
-                                signed_url = blob.generate_signed_url(
-                                    version="v4",
-                                    expiration=timedelta(days=7),
-                                    method="GET"
-                                )
-                                print(f"{file_type}: {signed_url}")
-                            except Exception as e:
-                                logger.error(f"Error generating signed URL for {file}: {str(e)}")
-                                print(f"{file_type}: gs://{GCS_BUCKET_NAME}/{file} (Error generating signed URL)")
-                        
-                        return
+                # GCS path to the Excel file
+                gcs_excel_path = f"{GCS_EXCEL_FOLDER}/{excel_filename}"
                 
-                # If we got here, either the report download failed or user wants to regenerate
-                logger.info("Generating a new report...")
+                # Download the file
+                download_success = download_from_gcs(gcs_excel_path, local_excel_path)
+                
+                if not download_success:
+                    logger.error(f"Failed to download Excel file from GCS. Falling back to local file.")
+                    # Fall back to the local file
+                    excel_path = excel_filename
+                else:
+                    excel_path = local_excel_path
+            else:
+                # Use the local Excel file
+                excel_path = excel_filename
+            
+            # Load the customer data from Excel
+            logger.info(f"Loading customer data for verification: {excel_path}")
+            df = pd.read_excel(excel_path)
+            
+            # Verify the SAVM ID match with human input
+            verified_savm_id, verified_metadata = await verify_savm_id_match(
+                verified_url, 
+                savm_id, 
+                customer_name, 
+                df
+            )
+            
+            if verified_savm_id:
+                savm_id = verified_savm_id
+                customer_metadata = verified_metadata
+                customer_name = verified_metadata.get('SAVM_NAME_WITH_ID', company_name)
+                logger.info(f"Using verified SAVM ID: {savm_id} for {customer_name}")
+            else:
+                logger.warning("SAVM ID verification failed. Will use the company name without metadata.")
+                savm_id = None
+                customer_metadata = None
+                customer_name = company_name
+            
+            # If we have a verified SAVM ID, check for existing reports
+            if savm_id:
+                # Check for existing reports
+                existing_reports = check_existing_reports(savm_id)
+                
+                if existing_reports and any(report['is_recent'] for report in existing_reports):
+                    # We have a recent report (less than 30 days old)
+                    recent_report = next(report for report in existing_reports if report['is_recent'])
+                    logger.info(f"Found recent report ({recent_report['age_days']} days old): {recent_report['file_path']}")
+                    
+                    # Download the report
+                    report_content = download_report_from_gcs(recent_report['file_path'])
+                    
+                    if report_content:
+                        logger.info(f"Successfully downloaded existing report")
+                        
+                        # Display the report summary
+                        logger.info(f"Company: {customer_name}")
+                        logger.info(f"URL: {verified_url}")
+                        logger.info(f"Report Age: {recent_report['age_days']} days")
+                        logger.info(f"Report Path: gs://{GCS_BUCKET_NAME}/{recent_report['file_path']}")
+                        
+                        if 'content' in report_content:
+                            # Extract the first 300 characters of content as a preview
+                            content_preview = report_content['content'][:300] + "..." if len(report_content['content']) > 300 else report_content['content']
+                            logger.info(f"Content Preview:\n{content_preview}")
+                        
+                        # Ask if user wants to generate a new report anyway
+                        print("\nDo you want to generate a new report anyway? (yes/no): ")
+                        regenerate = input("> ").lower() == 'yes'
+                        
+                        if not regenerate:
+                            logger.info("User chose to use existing report")
+                            
+                            # Display all available report formats
+                            print("\n=== Available Report Links ===")
+                            
+                            # Get all files in the bucket
+                            all_files = list_files_in_gcs()
+                            
+                            # Check for related files with the same base name but different extensions
+                            base_path = recent_report['file_path'].rsplit('.', 1)[0]
+                            related_files = [f for f in all_files if f.startswith(base_path)]
+                            
+                            for file in related_files:
+                                file_type = "Unknown"
+                                if file.endswith('.md'):
+                                    file_type = "Markdown"
+                                elif file.endswith('.docx'):
+                                    file_type = "Word Document"
+                                elif file.endswith('.json'):
+                                    file_type = "JSON Data"
+                                    
+                                # Generate a signed URL for this file
+                                try:
+                                    client = get_gcs_client()
+                                    bucket = client.bucket(GCS_BUCKET_NAME)
+                                    blob = bucket.blob(file)
+                                    signed_url = blob.generate_signed_url(
+                                        version="v4",
+                                        expiration=timedelta(days=7),
+                                        method="GET"
+                                    )
+                                    print(f"{file_type}: {signed_url}")
+                                except Exception as e:
+                                    logger.error(f"Error generating signed URL for {file}: {str(e)}")
+                                    print(f"{file_type}: gs://{GCS_BUCKET_NAME}/{file} (Error generating signed URL)")
+                            
+                            return
+                    
+                    # If we got here, either the report download failed or user wants to regenerate
+                    logger.info("Generating a new report...")
         
         # Generate a new report using process_url
         logger.info(f"Generating new report for {customer_name} ({verified_url})")
@@ -730,7 +962,9 @@ Note: Focus ONLY on {company_name_short}. Do NOT include general industry trends
                 url=verified_url, 
                 topic=topic, 
                 customer_name=customer_name, 
-                customer_metadata=customer_metadata
+                customer_metadata=customer_metadata,
+                planner_model="gpt-4o",
+                planner_provider="azure_openai"
             )
             
             if result:

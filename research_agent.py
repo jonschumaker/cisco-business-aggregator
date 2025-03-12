@@ -39,31 +39,39 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 # Set up Google Cloud Storage credentials path
 CREDENTIALS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "secrets", "google-credentials-dev.json")
 
+# Set Azure OpenAI environment variables with the correct names
+# This resolves the environment variable name mismatch issue
+os.environ["OPENAI_API_KEY"] = os.getenv("AZURE_OPENAI_API_KEY", OPENAI_API_KEY)  # Use Azure key for OpenAI
+os.environ["OPENAI_API_VERSION"] = os.getenv("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+os.environ["AZURE_OPENAI_API_KEY"] = os.getenv("AZURE_OPENAI_API_KEY")
+os.environ["AZURE_OPENAI_ENDPOINT"] = os.getenv("AZURE_OPENAI_ENDPOINT", "https://phx-sales-ai.openai.azure.com/")
+os.environ["AZURE_DEPLOYMENT_NAME"] = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+
 # Check if API keys are available
-if not OPENAI_API_KEY:
-    logger.error("OPENAI_API_KEY not found in environment variables. Please add it to your .env file.")
-    raise ValueError("Missing OPENAI_API_KEY in environment variables")
+if not os.environ.get("OPENAI_API_KEY"):
+    logger.error("Neither OPENAI_API_KEY nor AZURE_OPENAI_API_KEY found in environment variables. Please add one of them to your .env file.")
+    raise ValueError("Missing OpenAI API key in environment variables")
     
 if not TAVILY_API_KEY:
     logger.error("TAVILY_API_KEY not found in environment variables. Please add it to your .env file.")
     raise ValueError("Missing TAVILY_API_KEY in environment variables")
 
 # Set environment variables for libraries that need them
-os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
 
-# Function to get a temporary directory for storing files before uploading to GCS
+# Extract bucket information from env vars
+GCS_BUCKET_PATH = os.getenv("OUTCOMES_PATH", "gs://sales-ai-dev-outcomes-6f1ce1c")
+GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
+GCS_FOLDER = "news-reports"
+GCS_EXCEL_FOLDER = "data"  # Folder where Excel files are stored in GCS
+
+# Check if we should use GCS for Excel files
+USE_GCS_EXCEL = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
+
 def get_temp_dir():
     """Create and return a temporary directory for storing files before uploading to GCS."""
     return tempfile.mkdtemp(prefix="news_reports_")
-
-# Set up Google Cloud Storage
-# Get bucket path from environment variables
-GCS_BUCKET_PATH = os.getenv("OUTCOMES_PATH", "gs://sales-ai-dev-outcomes-6f1ce1c")
-# Extract bucket name from the path (remove gs:// prefix)
-GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
-GCS_FOLDER = "news-reports"
 
 def get_gcs_client():
     """Get authenticated Google Cloud Storage client."""
@@ -73,30 +81,6 @@ def get_gcs_client():
     except Exception as e:
         logger.error(f"Error initializing GCS client: {str(e)}")
         return None
-
-def download_from_gcs(gcs_file_path, local_file_path):
-    """Download a file from Google Cloud Storage."""
-    try:
-        client = get_gcs_client()
-        if not client:
-            logger.error("Failed to initialize GCS client")
-            return False
-            
-        bucket = client.bucket(GCS_BUCKET_NAME)
-        blob = bucket.blob(gcs_file_path)
-        
-        if not blob.exists():
-            logger.error(f"File not found in GCS: gs://{GCS_BUCKET_NAME}/{gcs_file_path}")
-            return False
-        
-        logger.info(f"Downloading file from GCS: gs://{GCS_BUCKET_NAME}/{gcs_file_path} to {local_file_path}")
-        blob.download_to_filename(local_file_path)
-        
-        logger.info(f"File successfully downloaded from GCS to {local_file_path}")
-        return True
-    except Exception as e:
-        logger.error(f"Error downloading from GCS: {str(e)}")
-        return False
 
 def upload_to_gcs(local_file_path, gcs_destination_path):
     """Upload a file to Google Cloud Storage."""
@@ -143,10 +127,10 @@ async def research_topic(
     urls: Union[str, List[str]] = None,
     tavily_days_back: int = 365, 
     max_search_depth: int = 1,
-    writer_provider: str = "openai",
+    writer_provider: str = "azure_openai",
     writer_model: str = "gpt-4o",
-    planner_provider: str = "openai",
-    planner_model: str = "o3-mini"
+    planner_provider: str = "azure_openai",
+    planner_model: str = "gpt-4o"
 ):
     """
     Research a topic using the deep research tool with OpenAI.
@@ -925,7 +909,7 @@ def extract_company_name(url: str, customer_name: str = None):
         clean_url = url.replace('http://', '').replace('https://', '').replace('www.', '')
         return clean_url.split('.')[0].capitalize()
 
-async def process_url(url, topic=None, customer_name=None, customer_metadata=None, planner_model="gpt-4-turbo", planner_provider="openai"):
+async def process_url(url, topic=None, customer_name=None, customer_metadata=None, planner_model="gpt-4o", planner_provider="azure_openai"):
     """Process a single URL to generate a research report"""
     logger.info(f"🔍 Researching {customer_name or url}...")
     
@@ -955,7 +939,9 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
                             tavily_days_back=tavily_days_back,  # Look back 60 days initially
                             max_search_depth=2,    # Increase search depth
                             planner_model=planner_model,
-                            planner_provider=planner_provider
+                            planner_provider=planner_provider,
+                            writer_provider="azure_openai",
+                            writer_model="gpt-4o"
                 ):
                     # Debug the event
                     debug_event(event, prefix="  ")
@@ -1007,7 +993,9 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
                         tavily_days_back=tavily_days_back,  # Look back 365 days
                         max_search_depth=2,    # Increase search depth
                         planner_model=planner_model,
-                        planner_provider=planner_provider
+                        planner_provider=planner_provider,
+                        writer_provider="azure_openai",
+                        writer_model="gpt-4o"
                     ):
                         # Debug the event
                         debug_event(event, prefix="  ")
@@ -1167,38 +1155,77 @@ async def process_url(url, topic=None, customer_name=None, customer_metadata=Non
             logger.error(f"Failed to save and upload placeholder report for {customer_name or url}")
             return None
 
+def download_from_gcs(gcs_path, local_path):
+    """Download a file from Google Cloud Storage."""
+    try:
+        client = get_gcs_client()
+        if not client:
+            logger.error("Failed to initialize GCS client")
+            return False
+            
+        # Extract the blob path from the full GCS path
+        if gcs_path.startswith("gs://"):
+            # Remove the gs:// prefix and bucket name
+            parts = gcs_path.replace("gs://", "").split("/", 1)
+            if len(parts) < 2:
+                logger.error(f"Invalid GCS path format: {gcs_path}")
+                return False
+            blob_path = parts[1]
+        else:
+            # Assume the path is already a blob path
+            blob_path = gcs_path
+        
+        bucket = client.bucket(GCS_BUCKET_NAME)
+        blob = bucket.blob(blob_path)
+        
+        logger.info(f"Downloading file from gs://{GCS_BUCKET_NAME}/{blob_path} to {local_path}")
+        blob.download_to_filename(local_path)
+        
+        if os.path.exists(local_path):
+            logger.info(f"File successfully downloaded to {local_path}")
+            return True
+        else:
+            logger.error(f"File download did not create the expected local file: {local_path}")
+            return False
+    except Exception as e:
+        logger.error(f"Error downloading from GCS: {str(e)}")
+        return False
+
 def load_customer_data():
     """Load customer data from Excel file and filter for valid websites and Heartland-Gulf."""
     try:
-        # First, check if we need to download the Excel file from GCS
+        # Define the Excel file path
         excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
-        excel_path = excel_filename
         
-        # Check if we should try to download the latest version from GCS
-        use_gcs_file = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
-        
-        if use_gcs_file:
-            # Path in GCS for the latest Excel file
-            gcs_excel_path = "customer-data/Customer Parquet top 80 select hierarchy for test_latest.xlsx"
+        if USE_GCS_EXCEL:
+            # If using GCS, download the Excel file from GCS
+            logger.info("Using Excel file from Google Cloud Storage")
             
-            # Temporary local path for the downloaded file
+            # Create a temporary directory for the downloaded file
             temp_dir = get_temp_dir()
             local_excel_path = os.path.join(temp_dir, excel_filename)
             
-            # Try to download the file
+            # GCS path to the Excel file
+            gcs_excel_path = f"{GCS_EXCEL_FOLDER}/{excel_filename}"
+            
+            # Download the file
             download_success = download_from_gcs(gcs_excel_path, local_excel_path)
             
-            if download_success:
-                excel_path = local_excel_path
-                logger.info(f"Using Excel file downloaded from GCS: {excel_path}")
+            if not download_success:
+                logger.error(f"Failed to download Excel file from GCS. Falling back to local file.")
+                # Fall back to the local file
+                excel_path = excel_filename
             else:
-                logger.warning("Failed to download Excel file from GCS, falling back to local file")
+                excel_path = local_excel_path
+        else:
+            # Use the local Excel file
+            excel_path = excel_filename
         
         # Load the Excel file
+        logger.info(f"Loading customer data from: {excel_path}")
         df = pd.read_excel(excel_path)
         
-        # Log where the data is loaded from
-        logger.info(f"Loaded {len(df)} rows from Excel file: {excel_path}")
+        logger.info(f"Loaded {len(df)} rows from Excel file")
         
         # Filter for valid websites (not blank or ".")
         df = df[df['WEBSITE'].notna()]  # Remove NaN values
