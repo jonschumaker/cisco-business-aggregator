@@ -79,8 +79,8 @@ GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
 GCS_FOLDER = "news-reports"
 GCS_EXCEL_FOLDER = "data"  # Folder where Excel files are stored in GCS
 
-# Check if we should use GCS for Excel files
-USE_GCS_EXCEL = os.getenv("USE_GCS_EXCEL", "false").lower() == "true"
+# Always use GCS for Excel files
+USE_GCS_EXCEL = True
 
 # Flag to control whether to print links to files
 PRINT_FILE_LINKS = True
