@@ -6,12 +6,14 @@ A research agent that generates reports on companies based on news and web conte
 
 - Automated research on companies using their website URLs
 - Integration with Tavily for web search capabilities
+- Azure OpenAI integration with GPT-4o for advanced text generation
+- Human-in-the-loop verification for URLs and company identification
 - Generation of comprehensive reports in three formats:
   - Markdown: Human-readable format with structured sections
   - Word (.docx): Professionally formatted document with proper styling, tables, and clickable hyperlinks
   - JSON: Structured data format with customer metadata for programmatic processing
 - Intelligent section parsing that categorizes content by type (introduction, company news, IT priorities, etc.)
-- Customer metadata integration from Excel files
+- Customer metadata integration from Excel files stored in Google Cloud Storage
 - Optimized JSON structure using SAVM_ID as the primary key
 - Robust error handling with informative error reports
 - Retry mechanism for API failures with exponential backoff
@@ -47,45 +49,46 @@ cp .env.example .env
 Then edit the `.env` file to add your API keys:
 
 ```
+# OpenAI API credentials
 OPENAI_API_KEY=your_openai_api_key
+
+# Azure OpenAI configuration - used for all LLM operations
+AZURE_OPENAI_ENDPOINT=https://your-azure-openai-service.openai.azure.com/
+AZURE_OPENAI_API_KEY=your_azure_openai_api_key
+AZURE_OPENAI_API_VERSION=2024-08-01-preview
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-4o
+
+# Tavily API key for web search
 TAVILY_API_KEY=your_tavily_api_key
-GOOGLE_APPLICATION_CREDENTIALS=path/to/google-credentials.json  # Optional for cloud storage
-USE_GCS_EXCEL=true  # Set to true to use Excel file from Google Cloud Storage
+
+# Google Cloud Storage configuration
+GOOGLE_APPLICATION_CREDENTIALS=path/to/google-credentials.json
+OUTCOMES_PATH=gs://your-bucket-name
 ```
 
 The `.env` file is ignored by git to ensure your API keys are not committed to version control.
 
 ## Google Cloud Storage Integration
 
-The system can use Google Cloud Storage (GCS) for both storing generated reports and loading the customer Excel file. This provides several benefits:
+The system uses Google Cloud Storage (GCS) for both storing generated reports and loading the customer Excel file. This provides several benefits:
 
 1. Centralized data storage accessible by all team members
 2. Versioned Excel file storage with both timestamped and standard filenames
 3. Secure access via signed URLs
 4. Automatic fallback to local files if GCS access fails
 
-### Uploading Excel Database to GCS
+### Required Google Cloud Setup
 
-To upload the customer Excel file to Google Cloud Storage, run:
-
-```bash
-python upload_excel_to_gcs.py
-```
-
-This will:
-1. Upload the Excel file to GCS with two filenames:
-   - Standard filename (always the same for easy reference)
-   - Versioned filename with timestamp (for historical records)
-2. Generate signed URLs for accessing the files
-3. Report success with file paths and access URLs
-
-The script will handle file verification, error handling, and provide detailed logs. Once uploaded, set `USE_GCS_EXCEL=true` in your `.env` file to make the research scripts use the Excel file from GCS instead of the local copy.
+1. Create a Google Cloud Project
+2. Create a Storage bucket
+3. Generate service account credentials and save as `secrets/google-credentials-dev.json`
+4. Upload the Excel database to GCS
 
 ## Usage
 
 ### Company URL Finder Tool
 
-You can use our new interactive tool to quickly search for a specific company and generate a report:
+You can use our interactive tool to quickly search for a specific company and generate a report:
 
 ```bash
 python company_url_finder.py
@@ -96,14 +99,26 @@ This script will:
 2. Search for the company's official website using Tavily
 3. Ask you to verify the URL (or provide the correct one)
 4. Search for the URL in the database to find the matching SAVM ID
-5. Check if an existing report is available (within the last 30 days)
-6. Either display links to existing reports or generate a new one
+5. Ask you to verify if the correct company was matched
+6. If incorrect, allow searching for the right company by name
+7. Check if an existing report is available (within the last 30 days)
+8. Either display links to existing reports or generate a new one
 
 This is the recommended way to research a single company quickly, as it provides:
 - Interactive verification to ensure the correct URL is used
+- Interactive verification to ensure the correct company is identified
 - Intelligent URL matching between search results and database entries
 - Access to existing reports without unnecessary regeneration
 - Direct links to all report formats (Markdown, Word, JSON)
+
+### Human-in-the-Loop Verification
+
+The application includes two key verification steps where human input is requested:
+
+1. **URL Verification**: After finding a potential company URL, the user is asked to verify if it's correct or provide the correct URL
+2. **Company/SAVM_ID Verification**: After matching the URL to a company in the database, the user is asked to verify if the correct company was identified, or search for the correct one by name
+
+These verification steps ensure accuracy and allow manual correction when automatic matching fails.
 
 ### Running the Full Research Agent
 
@@ -114,13 +129,25 @@ python research_agent.py
 ```
 
 The script will:
-1. Load customer data from the Excel file, filtering for valid websites and the Heartland-Gulf region
-2. Extract customer metadata from all columns in the Excel file
+1. Load customer data from the Excel file in Google Cloud Storage
+2. Filter for valid websites
 3. Research each company's website with a focus on company news and IT priorities
 4. Generate structured reports in Markdown, Word, and JSON formats
-5. Save reports to the local `reports` directory (or Google Cloud Storage if configured)
+5. Save reports to Google Cloud Storage
 
-### JSON Export Structure
+### Azure OpenAI Integration
+
+The application uses Azure OpenAI for all language model operations. The configuration is handled at startup with proper environment variable mapping.
+
+To verify Azure OpenAI connectivity, you can run the test script:
+
+```bash
+python test_langchain_azure.py
+```
+
+This script will test both direct OpenAI API access and the LangChain integration.
+
+## JSON Export Structure
 
 The JSON export includes:
 - SAVM_ID as the primary key at the top level
@@ -148,27 +175,28 @@ The Word documents generated by the agent include:
 
 - `research_agent.py`: Main script for the research agent
 - `company_url_finder.py`: Interactive tool for finding company URLs and generating reports
-- `upload_excel_to_gcs.py`: Script to upload the Excel database to Google Cloud Storage
+- `test_langchain_azure.py`: Test script for Azure OpenAI connectivity
 - `requirements.txt`: Python dependencies
-- `pyproject.toml`: Project configuration
-- `.gitignore`: Git ignore file for excluding unnecessary files
-- `.env`: Environment variables configuration (see .env.example for template)
-- `reports/`: Local directory for generated reports
-- `temp/`: Temporary directory for file processing
+- `.env`: Environment variables configuration
 - `secrets/`: Directory containing Google Cloud credentials
-- `Customer Parquet top 80 select hierarchy for test.xlsx`: Customer database
+- `Customer Parquet top 80 select hierarchy for test.xlsx`: Customer database (locally and in GCS)
 
 ## Key Functions
 
+### company_url_finder.py
+- `find_company_url()`: Uses Tavily to find a company's official website
+- `verify_url_human_in_loop()`: Gets human verification of the URL
+- `search_database_for_url()`: Searches Excel database for URL match
+- `verify_savm_id_match()`: Gets human verification of the company match
+- `check_existing_reports()`: Checks for recent reports in GCS
+- `download_report_from_gcs()`: Downloads existing reports from GCS
+
+### research_agent.py
 - `research_topic()`: Core function for researching a topic using LLMs
 - `process_url()`: Processes a single URL to generate a research report
-- `process_all_urls()`: Processes all URLs from the customer data
 - `save_markdown_report()`: Saves the report in Markdown format and calls other export functions
 - `save_json_report()`: Parses markdown content into structured JSON with metadata
 - `markdown_to_word()`: Converts markdown to a formatted Word document with proper styling
-- `standardize_sources_in_markdown()`: Ensures consistent source formatting in markdown
-- `add_hyperlink()`: Adds clickable hyperlinks to Word documents
-- `load_customer_data()`: Loads and filters customer data from Excel
 
 ## Dependencies
 
@@ -178,8 +206,9 @@ The Word documents generated by the agent include:
 - python-docx, markdown, docx: Document generation and conversion
 - aiohttp, asyncio: Asynchronous processing
 - regex: Advanced text processing
-- tqdm: Progress bars for better user experience
-- google-cloud-storage: Cloud storage integration (optional)
+- google-cloud-storage: Cloud storage integration
+- openai: OpenAI API client
+- python-dotenv: Environment variable management
 
 ## Troubleshooting
 
@@ -187,8 +216,9 @@ If you encounter issues:
 
 1. Check that your API keys are correctly set in the `.env` file
 2. Ensure all dependencies are installed with the correct versions
-3. Check the log file (`research_agent.log`) for detailed error messages
-4. For Word document formatting issues, ensure the `python-docx` and `docx` packages are properly installed
+3. Check the log file (`company_url_finder.log` or console output) for detailed error messages
+4. For Azure OpenAI connectivity issues, run `test_langchain_azure.py` to diagnose the problem
+5. For Google Cloud Storage issues, verify your credentials and bucket access permissions
 
 ## License
 

@@ -1,3 +1,21 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+News Research Agent
+
+This module provides functionality to research companies and generate comprehensive reports
+based on news and web content. It integrates with Azure OpenAI, Tavily search, and Google Cloud Storage
+to create well-structured reports in multiple formats (Markdown, Word, JSON).
+
+Key Features:
+- Deep research using AI models with web search capabilities
+- Report generation in multiple formats (Markdown, Word, JSON)
+- Integration with Google Cloud Storage for file storage
+- Customer metadata integration from Excel files
+- Human-readable formatting with proper styling and structure
+"""
+
 import os
 from dotenv import load_dotenv
 from typing import Union, List

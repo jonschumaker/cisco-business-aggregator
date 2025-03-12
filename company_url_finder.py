@@ -1,6 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+Company URL Finder Tool
+
+This module provides functionality to find and verify company URLs, match them with
+customer records in the database, and generate research reports about the companies.
+
+Key Features:
+- URL discovery using Tavily search API
+- Human-in-the-loop verification of URLs and company matches
+- Integration with Google Cloud Storage for Excel database and report storage
+- Report generation using the research_agent module
+"""
+
 import os
 import re
 import json
@@ -89,11 +102,21 @@ async def find_company_url(company_name: str) -> str:
     """
     Use Tavily to find the official website URL for a company.
     
+    This function leverages the Tavily search API to find the most likely
+    official website for a given company. It performs intelligent extraction
+    and filtering of URLs from search results.
+    
+    Search strategy:
+    1. First attempt: search for "what is the official website URL for {company_name}"
+    2. Extract URLs from the answer and context
+    3. If no URLs found, second attempt: search for "{company_name} official website"
+    4. Filter and score URLs based on relevance to the company name
+    
     Args:
         company_name (str): The name of the company to search for.
         
     Returns:
-        str: The official website URL of the company.
+        str: The official website URL of the company, or None if not found.
     """
     logger.info(f"Finding URL for company: {company_name}")
     
@@ -104,7 +127,8 @@ async def find_company_url(company_name: str) -> str:
     query = f"what is the official website URL for {company_name}"
     
     try:
-        # Perform the search
+        # STEP 1: Perform the initial search
+        logger.info(f"Performing Tavily search with query: '{query}'")
         search_result = tavily_client.search(
             query=query,
             search_depth="advanced",
@@ -113,7 +137,7 @@ async def find_company_url(company_name: str) -> str:
             exclude_domains=None
         )
         
-        # Extract potential URLs from the answer and context
+        # STEP 2: Extract potential URLs from search results
         urls = []
         
         # Extract from the answer if available
@@ -146,7 +170,7 @@ async def find_company_url(company_name: str) -> str:
                 if "url" in context_item and context_item["url"]:
                     urls.append(context_item["url"])
         
-        # If we found no URLs in the answer or context, try direct Tavily searches
+        # STEP 3: Try a second search if no URLs found
         if not urls:
             logger.info("No URLs found in initial search, trying direct website search")
             # Try a more direct query
@@ -163,11 +187,11 @@ async def find_company_url(company_name: str) -> str:
                     if "url" in result:
                         urls.append(result["url"])
         
-        # Remove duplicates and filter irrelevant URLs
+        # STEP 4: Filter and prioritize URLs
+        # Remove duplicates
         urls = list(set(urls))
         
         # Filter URLs to keep only those likely to be company websites
-        # 1. Check if company name is in the domain (converting to lowercase for comparison)
         company_name_parts = company_name.lower().split()
         filtered_urls = []
         
@@ -189,6 +213,7 @@ async def find_company_url(company_name: str) -> str:
             if any(part in domain_without_tld for part in company_name_parts) or domain_without_tld in company_name.lower():
                 filtered_urls.append(url)
         
+        # STEP 5: Score and select the best URL
         # If we have filtered URLs, use those, otherwise fall back to all URLs
         potential_urls = filtered_urls if filtered_urls else urls
         
@@ -226,8 +251,10 @@ async def find_company_url(company_name: str) -> str:
             url_scores.sort(key=lambda x: x[1], reverse=True)
             potential_urls = [url for url, _ in url_scores]
         
+        # Return the best URL found, or None if no URLs were found
         if potential_urls:
             logger.info(f"Found potential URLs: {potential_urls}")
+            logger.info(f"Selected best URL: {potential_urls[0]}")
             return potential_urls[0]
         else:
             logger.warning(f"No URLs found for {company_name}")
@@ -239,13 +266,22 @@ async def find_company_url(company_name: str) -> str:
 
 def extract_domain(url: str) -> str:
     """
-    Extract the domain from a URL and normalize it.
+    Extract and normalize the domain from a URL.
+    
+    This function handles various URL formats, including URLs with or without protocols,
+    and normalizes the domain by:
+    1. Adding https:// if missing
+    2. Parsing the domain from the URL
+    3. Converting to lowercase
+    4. Removing www. prefix if present
+    
+    The function includes fallback logic for cases where standard URL parsing fails.
     
     Args:
         url (str): The URL to process.
         
     Returns:
-        str: The normalized domain.
+        str: The normalized domain, or empty string if input is invalid or parsing fails.
     """
     if not url:
         return ""
@@ -255,6 +291,7 @@ def extract_domain(url: str) -> str:
         url = 'https://' + url
     
     try:
+        # Use standard URL parsing
         parsed_url = urlparse(url)
         domain = parsed_url.netloc.lower()
         
@@ -264,23 +301,38 @@ def extract_domain(url: str) -> str:
         
         return domain
     except:
-        # If parsing fails, try a simple approach
-        url = url.lower()
-        url = url.replace('https://', '').replace('http://', '')
-        if url.startswith('www.'):
-            url = url[4:]
-        return url.split('/')[0]
+        # Fallback method if standard parsing fails
+        logger.warning(f"Standard URL parsing failed for {url}, using fallback method")
+        try:
+            # Simple approach: remove protocols and split by first /
+            url = url.lower()
+            url = url.replace('https://', '').replace('http://', '')
+            if url.startswith('www.'):
+                url = url[4:]
+            return url.split('/')[0]
+        except Exception as e:
+            logger.error(f"Domain extraction failed completely for {url}: {str(e)}")
+            return ""
 
 def find_best_url_match(target_url: str, urls: List[str]) -> str:
     """
-    Find the best match for a URL in a list of URLs using regex pattern matching.
+    Find the best match for a URL in a list of URLs using domain comparison.
+    
+    This function attempts to find the most similar domain among a list of URLs
+    that matches the target URL. It extracts domains, normalizes them, and compares
+    them using both exact matches and similarity-based scoring.
+    
+    Matching strategy:
+    1. First attempt exact domain matches
+    2. If no exact matches, try flexible domain matching with similarity scoring
+    3. Higher scoring is given to shorter domain name differences and longer common prefixes
     
     Args:
         target_url (str): The URL to match.
         urls (List[str]): The list of URLs to search in.
         
     Returns:
-        str: The best matching URL from the list.
+        str: The best matching URL from the list, or None if no match found.
     """
     if not target_url or not urls:
         return None
@@ -297,13 +349,13 @@ def find_best_url_match(target_url: str, urls: List[str]) -> str:
     # Pattern 2: Domain with optional www prefix and any protocol
     flexible_pattern = rf'^(?:www\.)?{re.escape(target_domain)}(?:/.*)?$'
     
-    # First, try exact matches
+    # First, try exact matches (highest priority)
     for url in urls:
         url_domain = extract_domain(url)
         if url_domain == target_domain:
             return url
     
-    # Second, try regex pattern matches
+    # Second, try regex pattern matches with similarity scoring
     matches = []
     for url in urls:
         url_domain = extract_domain(url)
@@ -320,7 +372,7 @@ def find_best_url_match(target_url: str, urls: List[str]) -> str:
             # Penalize length differences
             similarity += abs(len(url_domain) - len(target_domain))
             
-            # Check common prefix length
+            # Check common prefix length - longer common prefix gets better score
             common_prefix_len = 0
             for i in range(min(len(url_domain), len(target_domain))):
                 if url_domain[i] == target_domain[i]:
@@ -343,11 +395,22 @@ def find_best_url_match(target_url: str, urls: List[str]) -> str:
 
 async def verify_url_human_in_loop(company_name: str, url: str) -> str:
     """
-    Verify the company URL using human input (simplified without LangGraph).
+    Verify the company URL using human input.
+    
+    This function implements the human-in-the-loop verification process for ensuring
+    the correct URL is associated with a company. If the URL is incorrect, the user
+    can provide the correct URL.
+    
+    Flow:
+    1. Present the discovered URL to the user and ask for verification
+    2. If verified, return the original URL
+    3. If not verified, prompt for the correct URL
+    4. Attempt to extract/clean the provided URL
+    5. Return the corrected URL or a constructed fallback URL
     
     Args:
         company_name (str): The name of the company.
-        url (str): The URL to verify.
+        url (str): The discovered URL to verify.
         
     Returns:
         str: The verified URL, potentially modified by the human.
@@ -355,22 +418,25 @@ async def verify_url_human_in_loop(company_name: str, url: str) -> str:
     if not url:
         return None
     
+    # Ask the user to verify the URL
     logger.info(f"Requesting verification for URL: {url} for company: {company_name}")
     print(f"\nI found the website for {company_name} to be: {url}")
     print("\nIs this correct? (yes/no)")
     response = input("> ").lower()
     
+    # If the user confirms the URL is correct, return it
     if "yes" in response:
         logger.info(f"User verified URL: {url}")
         return url
     else:
+        # If the URL is incorrect, ask for the correct one
         logger.info("User indicated URL is incorrect, requesting correction")
         print("Please provide the correct URL:")
         corrected_url = input("> ")
         
-        # Try to extract a URL from the human's response if they didn't provide a clear URL
+        # Process the user input to ensure it's a valid URL
         if not corrected_url.startswith("http") and "." not in corrected_url:
-            # Try to find a URL in their response
+            # Try to find a URL pattern in their response
             url_pattern = r'https?://(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)'
             found_urls = re.findall(url_pattern, corrected_url)
             
@@ -378,6 +444,7 @@ async def verify_url_human_in_loop(company_name: str, url: str) -> str:
             domain_pattern = r'(?<!\S)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}(?!\S)'
             domain_urls = re.findall(domain_pattern, corrected_url)
             
+            # Use found URL or construct a simple one if none found
             if found_urls:
                 corrected_url = found_urls[0]
                 logger.info(f"Extracted URL from input: {corrected_url}")
@@ -386,12 +453,12 @@ async def verify_url_human_in_loop(company_name: str, url: str) -> str:
                 logger.info(f"Extracted domain and created URL: {corrected_url}")
             else:
                 logger.warning("No valid URL found in user input, creating simple URL from company name")
-                # Create a simplified URL from the company name
+                # Create a simplified URL from the company name as a fallback
                 company_url = company_name.lower().replace(" ", "")
                 corrected_url = f"https://{company_url}.com"
                 logger.info(f"Created simplified URL: {corrected_url}")
         
-        # Add https:// if missing
+        # Ensure the URL has a protocol (https://)
         if corrected_url and not corrected_url.startswith("http"):
             corrected_url = f"https://{corrected_url}"
             logger.info(f"Added https:// prefix to URL: {corrected_url}")
@@ -400,16 +467,21 @@ async def verify_url_human_in_loop(company_name: str, url: str) -> str:
 
 def download_from_gcs(gcs_path, local_path):
     """
-    Download a file from Google Cloud Storage.
+    Download a file from Google Cloud Storage to a local path.
+    
+    This function handles the process of downloading a file from GCS to a local path,
+    accounting for different path formats and properly extracting the blob path.
     
     Args:
-        gcs_path (str): The path to the file in GCS.
+        gcs_path (str): The path to the file in GCS. Can be a full path like 
+                       "gs://bucket-name/path/to/file" or just "path/to/file".
         local_path (str): The local path where the file should be saved.
         
     Returns:
         bool: True if the download was successful, False otherwise.
     """
     try:
+        # Initialize GCS client
         client = get_gcs_client()
         if not client:
             logger.error("Failed to initialize GCS client")
@@ -427,14 +499,18 @@ def download_from_gcs(gcs_path, local_path):
             # Assume the path is already a blob path
             blob_path = gcs_path
         
+        # Get the bucket and blob
         bucket = client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(blob_path)
         
+        # Download the file
         logger.info(f"Downloading file from gs://{GCS_BUCKET_NAME}/{blob_path} to {local_path}")
         blob.download_to_filename(local_path)
         
+        # Verify the file was downloaded
         if os.path.exists(local_path):
-            logger.info(f"File successfully downloaded to {local_path}")
+            file_size = os.path.getsize(local_path)
+            logger.info(f"File successfully downloaded to {local_path} ({file_size} bytes)")
             return True
         else:
             logger.error(f"File download did not create the expected local file: {local_path}")
@@ -445,7 +521,18 @@ def download_from_gcs(gcs_path, local_path):
 
 def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
     """
-    Search the database for a URL and return the matching SAVM ID.
+    Search the database for a URL and return the matching SAVM ID with metadata.
+    
+    This function attempts to find a company in the Excel database that matches 
+    the given URL. It downloads the Excel file from GCS (if configured) and performs
+    matching using domain comparison.
+    
+    Flow:
+    1. Determine the Excel file path (GCS or local)
+    2. Load customer data from Excel
+    3. Find the best URL match using domain comparison
+    4. Extract SAVM_ID and company metadata from the matching row
+    5. Return the SAVM_ID and metadata
     
     Args:
         url (str): The URL to search for.
@@ -458,6 +545,7 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
         # Define the Excel file path
         excel_filename = "Customer Parquet top 80 select hierarchy for test.xlsx"
         
+        # Step 1: Determine Excel file location (GCS or local)
         if USE_GCS_EXCEL:
             # If using GCS, download the Excel file from GCS
             logger.info("Using Excel file from Google Cloud Storage")
@@ -483,7 +571,7 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
             # Use the local Excel file
             excel_path = excel_filename
         
-        # Load the customer data from Excel
+        # Step 2: Load customer data from Excel
         logger.info(f"Loading customer data from: {excel_path}")
         df = pd.read_excel(excel_path)
         
@@ -494,12 +582,12 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
         df = df[df['WEBSITE'] != "."]   # Remove "." values
         df = df[df['WEBSITE'] != ""]    # Remove empty strings
         
+        # Step 3: Find the best URL match
         # Extract all URLs from the database
         urls = df['WEBSITE'].tolist()
-        
-        # Find the best match for the target URL
         best_match = find_best_url_match(url, urls)
         
+        # Step 4: Extract data from the matching row (if found)
         if best_match:
             # Get the row with the matching URL
             row = df[df['WEBSITE'] == best_match].iloc[0]
@@ -515,7 +603,7 @@ def search_database_for_url(url: str) -> Tuple[Optional[str], Optional[Dict]]:
                     savm_id = match.group(1)
                 customer_name = savm_name_with_id
             
-            # Create a metadata dictionary with all available fields
+            # Step 5: Create metadata dictionary
             metadata = {}
             for column in df.columns:
                 if pd.notna(row[column]):
@@ -538,22 +626,30 @@ def list_files_in_gcs(prefix: str = None) -> List[str]:
     """
     List files in the Google Cloud Storage bucket with an optional prefix.
     
+    This function retrieves a list of all files in the configured GCS bucket,
+    optionally filtered by a prefix. The prefix is appended to the GCS_FOLDER
+    to form the full path prefix.
+    
     Args:
-        prefix (str, optional): The prefix to filter files. Defaults to None.
+        prefix (str, optional): The prefix to filter files within the GCS_FOLDER.
+                               Defaults to None.
         
     Returns:
-        List[str]: A list of file paths.
+        List[str]: A list of file paths (blob names) in the bucket.
     """
     try:
+        # Initialize GCS client
         client = get_gcs_client()
         if not client:
             logger.error("Failed to initialize GCS client")
             return []
         
+        # Access the bucket
         bucket = client.bucket(GCS_BUCKET_NAME)
         
         # Set the full prefix including folder
         full_prefix = f"{GCS_FOLDER}/" if not prefix else f"{GCS_FOLDER}/{prefix}"
+        logger.info(f"Listing files in gs://{GCS_BUCKET_NAME}/{full_prefix}")
         
         # List all blobs with the prefix
         blobs = bucket.list_blobs(prefix=full_prefix)
@@ -561,6 +657,7 @@ def list_files_in_gcs(prefix: str = None) -> List[str]:
         # Extract the blob names
         file_paths = [blob.name for blob in blobs]
         
+        logger.info(f"Found {len(file_paths)} files in GCS bucket")
         return file_paths
     
     except Exception as e:
@@ -569,13 +666,21 @@ def list_files_in_gcs(prefix: str = None) -> List[str]:
 
 def check_existing_reports(savm_id: str) -> List[Dict]:
     """
-    Check if reports already exist for a given SAVM ID.
+    Check if reports already exist for a given SAVM ID in Google Cloud Storage.
+    
+    This function looks for existing report files in GCS that contain the specified
+    SAVM ID. It extracts timestamp information from the filenames to determine 
+    report age and sorts reports by recency.
     
     Args:
         savm_id (str): The SAVM ID to search for.
         
     Returns:
-        List[Dict]: A list of reports with their metadata.
+        List[Dict]: A list of report metadata dictionaries containing:
+            - file_path: The GCS path to the file
+            - timestamp: The report generation time (if available)
+            - age_days: The age of the report in days
+            - is_recent: Whether the report is less than 30 days old
     """
     try:
         # List all files in the GCS bucket
@@ -623,28 +728,35 @@ def check_existing_reports(savm_id: str) -> List[Dict]:
 
 def download_report_from_gcs(file_path: str) -> Dict:
     """
-    Download a report from Google Cloud Storage.
+    Download a report from Google Cloud Storage and parse its JSON content.
+    
+    This function connects to GCS, downloads the specified report file as a string,
+    and parses it as JSON.
     
     Args:
         file_path (str): The path to the file in GCS.
         
     Returns:
-        Dict: The report content as a dictionary.
+        Dict: The report content as a dictionary, or None if download fails.
     """
     try:
+        # Initialize GCS client
         client = get_gcs_client()
         if not client:
             logger.error("Failed to initialize GCS client")
             return None
         
+        # Get the bucket and blob
         bucket = client.bucket(GCS_BUCKET_NAME)
         blob = bucket.blob(file_path)
         
         # Download as string
+        logger.info(f"Downloading report from GCS: gs://{GCS_BUCKET_NAME}/{file_path}")
         json_str = blob.download_as_string()
         
         # Parse JSON content
         report_content = json.loads(json_str)
+        logger.info(f"Successfully downloaded and parsed report ({len(json_str)} bytes)")
         
         return report_content
     
@@ -656,9 +768,21 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
     """
     Verify the SAVM_ID match with human input.
     
+    This function implements the human-in-the-loop verification process for ensuring
+    the correct company (SAVM_ID) is matched to a URL. If the initial match is incorrect,
+    it allows the user to search for the correct company by name.
+    
+    Flow:
+    1. Show the user the matched company and ask for verification
+    2. If verified, return the SAVM_ID and metadata
+    3. If not verified, prompt for correct company name
+    4. Search for matches in the database using the provided name
+    5. If multiple matches found, let the user select the correct one
+    6. Return the selected company's SAVM_ID and metadata, or None if no match
+    
     Args:
         verified_url (str): The verified URL
-        savm_id (str): The matched SAVM ID
+        savm_id (str): The initially matched SAVM ID
         savm_name (str): The SAVM name with ID
         df (pd.DataFrame): The dataframe containing customer data
         
@@ -666,11 +790,15 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
         Tuple[Optional[str], Optional[Dict]]: A tuple containing the verified SAVM ID and customer metadata,
                                            or (None, None) if no match is found.
     """
+    # Log the verification request
     logger.info(f"Requesting verification for SAVM_ID match: {savm_name} for URL: {verified_url}")
+    
+    # Ask the user to verify the match
     print(f"\nI found that this URL: {verified_url} matches with: {savm_name}")
     print("Is this the correct company? (yes/no)")
     response = input("> ").lower()
     
+    # If the user verifies the match, return the original SAVM_ID and metadata
     if "yes" in response:
         logger.info(f"User verified SAVM_ID match: {savm_id}")
         
@@ -688,6 +816,7 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
                     
         return savm_id, metadata
     else:
+        # If the user indicates the match is incorrect, search by name instead
         logger.info("User indicated SAVM_ID match is incorrect, searching by name instead")
         print("\nPlease enter the correct company name to search for:")
         company_name = input("> ")
@@ -712,6 +841,7 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
                 mask = df['SAVM_NAME_WITH_ID'].fillna("").str.lower().str.contains(pattern, regex=True)
                 name_matches = df[mask]
         
+        # Process the matches found (if any)
         if len(name_matches) > 0:
             # If multiple matches, let the user choose
             if len(name_matches) > 1:
@@ -724,7 +854,7 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
                     if 0 <= selection < len(name_matches):
                         selected_row = name_matches.iloc[selection]
                         
-                        # Extract the SAVM ID
+                        # Extract the SAVM ID from the selected row
                         match = re.search(r'\(([^)]+)\)', selected_row['SAVM_NAME_WITH_ID'])
                         if match:
                             savm_id = match.group(1)
@@ -765,6 +895,7 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
                     logger.info(f"Found match by name: {selected_row['SAVM_NAME_WITH_ID']} -> SAVM ID: {savm_id}")
                     return savm_id, metadata
         
+        # If no matches found or selection failed
         logger.warning(f"No matching company name found for '{company_name}'")
         return None, None
 
