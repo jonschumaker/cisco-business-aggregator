@@ -92,8 +92,10 @@ GCS_BUCKET_NAME = GCS_BUCKET_PATH.replace("gs://", "").split("/")[0]
 GCS_FOLDER = "news-reports"
 GCS_EXCEL_FOLDER = "data"  # Folder where Excel files are stored in GCS
 
-# Always use GCS for Excel files
-USE_GCS_EXCEL = True
+# Storage configuration
+USE_GCS_EXCEL = True  # Always use GCS for Excel files
+USE_LOCAL_STORAGE = os.getenv("USE_LOCAL_STORAGE", "true").lower() in ["true", "1", "yes"]  # Use local storage for reports
+LOCAL_REPORTS_DIR = os.getenv("LOCAL_REPORTS_DIR", "reports")  # Local directory for reports
 
 # Flag to control whether to print links to files
 PRINT_FILE_LINKS = True
@@ -1104,14 +1106,26 @@ Note: Focus ONLY on {company_name_short}. Do NOT include general industry trends
                 # Display the results
                 print("\n=== New Research Report Generated ===")
                 
-                if 'markdown_gcs_url' in result:
-                    print(f"Markdown Report: {result['markdown_gcs_url']}")
-                
-                if 'docx_gcs_url' in result:
-                    print(f"Word Document: {result['docx_gcs_url']}")
-                
-                if 'json_gcs_url' in result:
-                    print(f"JSON Report: {result['json_gcs_url']}")
+                # Handle local file paths if using local storage
+                if USE_LOCAL_STORAGE:
+                    if 'markdown_local_path' in result:
+                        print(f"Markdown Report saved to: {result['markdown_local_path']}")
+                    
+                    if 'docx_local_path' in result:
+                        print(f"Word Document saved to: {result['docx_local_path']}")
+                    
+                    if 'json_local_path' in result:
+                        print(f"JSON Report saved to: {result['json_local_path']}")
+                # Handle GCS URLs if using cloud storage
+                else:
+                    if 'markdown_gcs_url' in result:
+                        print(f"Markdown Report: {result['markdown_gcs_url']}")
+                    
+                    if 'docx_gcs_url' in result:
+                        print(f"Word Document: {result['docx_gcs_url']}")
+                    
+                    if 'json_gcs_url' in result:
+                        print(f"JSON Report: {result['json_gcs_url']}")
             else:
                 logger.error("Failed to generate report")
                 logger.error("Check the logs for details.")
@@ -1130,4 +1144,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        logger.error(f"Error in main execution: {str(e)}") 
+        logger.error(f"Error in main execution: {str(e)}")

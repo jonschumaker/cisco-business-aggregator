@@ -235,14 +235,14 @@ def standardize_sources_in_markdown(markdown_content: str) -> str:
     
     return '\n'.join(result_lines)
 
+# Get local reports directory from environment variable or use default
+LOCAL_REPORTS_DIR = os.getenv("LOCAL_REPORTS_DIR", "reports")
+# Check if we should use local storage instead of GCS
+USE_LOCAL_STORAGE = os.getenv("USE_LOCAL_STORAGE", "true").lower() in ["true", "1", "yes"]
+
 def save_markdown_report(url: str, content: str, topic: str, customer_name: str = None, customer_metadata: dict = None):
-    """Save the research report as a Markdown file and convert to Word document, then upload to GCS."""
-    temp_dir = None
+    """Save the research report as a Markdown file and convert to Word document, then save locally or upload to GCS."""
     try:
-        # Create a temporary directory for storing files before uploading to GCS
-        temp_dir = get_temp_dir()
-        logger.info(f"Created temporary directory: {temp_dir}")
-        
         # Create a filename based on the customer name or URL
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
@@ -258,9 +258,6 @@ def save_markdown_report(url: str, content: str, topic: str, customer_name: str 
             if domain.startswith('www.'):
                 domain = domain[4:]  # Remove 'www.' prefix
             base_filename = f"OUTCOMES_{domain}_{timestamp}"
-        
-        # Markdown file path (temporary storage)
-        md_file_path = os.path.join(temp_dir, f"{base_filename}.md")
         
         # Create markdown content with a more specific introduction
         company_name = extract_company_name(url, customer_name)
@@ -280,82 +277,137 @@ def save_markdown_report(url: str, content: str, topic: str, customer_name: str 
         # Standardize source formatting in the markdown content
         markdown_content = standardize_sources_in_markdown(markdown_content)
         
-        # Save the markdown file to temporary directory
-        with open(md_file_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-        
-        logger.info(f"Markdown report saved to temporary file: {md_file_path}")
-        
-        # Save the JSON version with chunked sections to temporary directory
-        json_file_path = os.path.join(temp_dir, f"{base_filename}.json")
-        save_json_report(markdown_content, json_file_path, url, topic, customer_name, company_name, customer_metadata)
-        logger.info(f"JSON report saved to temporary file: {json_file_path}")
-        
-        # Convert to Word document in temporary directory
-        docx_file_path = os.path.join(temp_dir, f"{base_filename}.docx")
-        try:
-            markdown_to_word(markdown_content, docx_file_path, customer_name or url)
-            logger.info(f"Word document saved to temporary file: {docx_file_path}")
-        except Exception as e:
-            logger.error(f"Error converting to Word: {str(e)}")
-            docx_file_path = None
-        
-        # Upload files to Google Cloud Storage
-        result = {}
-        upload_success = False
-        
-        # Upload markdown file to GCS
-        if os.path.exists(md_file_path):
-            gcs_md_path = f"{GCS_FOLDER}/{base_filename}.md"
-            md_url = upload_to_gcs(md_file_path, gcs_md_path)
-            if md_url:
-                result["markdown_gcs_url"] = md_url
-                upload_success = True
-            else:
-                logger.error(f"Failed to upload markdown file to GCS: {md_file_path}")
-        else:
-            logger.error(f"Markdown file does not exist: {md_file_path}")
+        # Determine if we're using local storage or GCS
+        if USE_LOCAL_STORAGE:
+            # Create local reports directory if it doesn't exist
+            os.makedirs(LOCAL_REPORTS_DIR, exist_ok=True)
             
-        # Upload JSON file to GCS
-        if os.path.exists(json_file_path):
-            gcs_json_path = f"{GCS_FOLDER}/{base_filename}.json"
-            json_url = upload_to_gcs(json_file_path, gcs_json_path)
-            if json_url:
-                result["json_gcs_url"] = json_url
-                upload_success = True
-            else:
-                logger.error(f"Failed to upload JSON file to GCS: {json_file_path}")
-        else:
-            logger.error(f"JSON file does not exist: {json_file_path}")
+            # Create company-specific subdirectory
+            company_dir = os.path.join(LOCAL_REPORTS_DIR, safe_name if customer_name else domain)
+            os.makedirs(company_dir, exist_ok=True)
             
-        # Upload Word document to GCS if available
-        if docx_file_path and os.path.exists(docx_file_path):
-            gcs_docx_path = f"{GCS_FOLDER}/{base_filename}.docx"
-            docx_url = upload_to_gcs(docx_file_path, gcs_docx_path)
-            if docx_url:
-                result["docx_gcs_url"] = docx_url
-                upload_success = True
-            else:
-                logger.error(f"Failed to upload Word document to GCS: {docx_file_path}")
-        elif docx_file_path:
-            logger.error(f"Word document does not exist: {docx_file_path}")
-        
-        if not upload_success:
-            logger.error("No files were successfully uploaded to GCS")
-            return None
+            # Save the markdown file locally
+            md_file_path = os.path.join(company_dir, f"{base_filename}.md")
+            with open(md_file_path, 'w', encoding='utf-8') as f:
+                f.write(markdown_content)
             
-        return result
-    except Exception as e:
-        logger.error(f"Error saving and uploading report: {str(e)}")
-        return None
-    finally:
-        # Clean up temporary directory
-        if temp_dir and os.path.exists(temp_dir):
+            logger.info(f"Markdown report saved locally: {md_file_path}")
+            
+            # Save the JSON version with chunked sections
+            json_file_path = os.path.join(company_dir, f"{base_filename}.json")
+            save_json_report(markdown_content, json_file_path, url, topic, customer_name, company_name, customer_metadata)
+            logger.info(f"JSON report saved locally: {json_file_path}")
+            
+            # Convert to Word document
+            docx_file_path = os.path.join(company_dir, f"{base_filename}.docx")
             try:
-                shutil.rmtree(temp_dir)
-                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+                markdown_to_word(markdown_content, docx_file_path, customer_name or url)
+                logger.info(f"Word document saved locally: {docx_file_path}")
             except Exception as e:
-                logger.error(f"Error cleaning up temporary directory: {str(e)}")
+                logger.error(f"Error converting to Word: {str(e)}")
+                docx_file_path = None
+            
+            # Return local file paths
+            result = {}
+            if os.path.exists(md_file_path):
+                result["markdown_local_path"] = md_file_path
+            if os.path.exists(json_file_path):
+                result["json_local_path"] = json_file_path
+            if docx_file_path and os.path.exists(docx_file_path):
+                result["docx_local_path"] = docx_file_path
+            
+            if not result:
+                logger.error("No files were successfully saved locally")
+                return None
+                
+            return result
+        else:
+            # Use GCS storage (original implementation)
+            temp_dir = None
+            try:
+                # Create a temporary directory for storing files before uploading to GCS
+                temp_dir = get_temp_dir()
+                logger.info(f"Created temporary directory: {temp_dir}")
+                
+                # Markdown file path (temporary storage)
+                md_file_path = os.path.join(temp_dir, f"{base_filename}.md")
+                
+                # Save the markdown file to temporary directory
+                with open(md_file_path, 'w', encoding='utf-8') as f:
+                    f.write(markdown_content)
+                
+                logger.info(f"Markdown report saved to temporary file: {md_file_path}")
+                
+                # Save the JSON version with chunked sections to temporary directory
+                json_file_path = os.path.join(temp_dir, f"{base_filename}.json")
+                save_json_report(markdown_content, json_file_path, url, topic, customer_name, company_name, customer_metadata)
+                logger.info(f"JSON report saved to temporary file: {json_file_path}")
+                
+                # Convert to Word document in temporary directory
+                docx_file_path = os.path.join(temp_dir, f"{base_filename}.docx")
+                try:
+                    markdown_to_word(markdown_content, docx_file_path, customer_name or url)
+                    logger.info(f"Word document saved to temporary file: {docx_file_path}")
+                except Exception as e:
+                    logger.error(f"Error converting to Word: {str(e)}")
+                    docx_file_path = None
+                
+                # Upload files to Google Cloud Storage
+                result = {}
+                upload_success = False
+                
+                # Upload markdown file to GCS
+                if os.path.exists(md_file_path):
+                    gcs_md_path = f"{GCS_FOLDER}/{base_filename}.md"
+                    md_url = upload_to_gcs(md_file_path, gcs_md_path)
+                    if md_url:
+                        result["markdown_gcs_url"] = md_url
+                        upload_success = True
+                    else:
+                        logger.error(f"Failed to upload markdown file to GCS: {md_file_path}")
+                else:
+                    logger.error(f"Markdown file does not exist: {md_file_path}")
+                    
+                # Upload JSON file to GCS
+                if os.path.exists(json_file_path):
+                    gcs_json_path = f"{GCS_FOLDER}/{base_filename}.json"
+                    json_url = upload_to_gcs(json_file_path, gcs_json_path)
+                    if json_url:
+                        result["json_gcs_url"] = json_url
+                        upload_success = True
+                    else:
+                        logger.error(f"Failed to upload JSON file to GCS: {json_file_path}")
+                else:
+                    logger.error(f"JSON file does not exist: {json_file_path}")
+                    
+                # Upload Word document to GCS if available
+                if docx_file_path and os.path.exists(docx_file_path):
+                    gcs_docx_path = f"{GCS_FOLDER}/{base_filename}.docx"
+                    docx_url = upload_to_gcs(docx_file_path, gcs_docx_path)
+                    if docx_url:
+                        result["docx_gcs_url"] = docx_url
+                        upload_success = True
+                    else:
+                        logger.error(f"Failed to upload Word document to GCS: {docx_file_path}")
+                elif docx_file_path:
+                    logger.error(f"Word document does not exist: {docx_file_path}")
+                
+                if not upload_success:
+                    logger.error("No files were successfully uploaded to GCS")
+                    return None
+                    
+                return result
+            finally:
+                # Clean up temporary directory
+                if temp_dir and os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir)
+                        logger.info(f"Cleaned up temporary directory: {temp_dir}")
+                    except Exception as e:
+                        logger.error(f"Error cleaning up temporary directory: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error saving report: {str(e)}")
+        return None
 
 def save_json_report(markdown_content: str, output_path: str, url: str, topic: str, 
                     customer_name: str = None, company_name: str = None, customer_metadata: dict = None):
