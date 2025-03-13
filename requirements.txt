@@ -7,28 +7,35 @@ asyncio>=3.4.3
 diskcache>=5.2.1  # For API response caching
 
 # LLM and research tools
-open-deep-research
-langgraph>=0.0.10
+openai>=1.3.0
+tavily-python>=0.1.0
 langchain>=0.0.267
 langchain-openai>=0.0.2
-tavily-python>=0.1.0
 
 # For document handling
 markdown>=3.3.0
 python-docx>=0.8.11
 openpyxl>=3.0.7  # For Excel file handling
-docx>=0.2.4      # For Word document creation
+pypandoc>=1.5.0  # For Markdown to Word conversion
 
 # Logging and utilities
 python-dotenv>=1.0.0
 tqdm>=4.62.0     # For progress bars
 
-# For cloud storage (if used)
+# For cloud storage
 google-cloud-storage>=2.0.0
 google-auth>=2.0.0
 
 # For regex and text processing
 regex>=2021.8.3
 
-# Added from the code block
-openai>=1.3.0
+# For data classes and type hints
+dataclasses>=0.8
+typing-extensions>=4.0.0
+
+# For command-line interfaces
+argparse>=1.4.0
+
+# For testing
+pytest>=6.2.5
+pytest-asyncio>=0.15.1
