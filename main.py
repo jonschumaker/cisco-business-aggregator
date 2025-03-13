@@ -172,21 +172,56 @@ async def run_product_innovation(args: argparse.Namespace) -> None:
     agent = ProductInnovationAgent()
     
     # Run the product innovation analysis
-    result = await agent.analyze_products(
-        manufacturer=args.manufacturer,
-        category=args.category,
-        model=args.model
-    )
+    try:
+        result = await agent.analyze_products(
+            manufacturer=args.manufacturer,
+            category=args.category,
+            model=args.model
+        )
+        
+        # Ensure result is a dictionary
+        if not isinstance(result, dict):
+            result = {"summary": str(result)}
+    except Exception as e:
+        logger.error(f"Error in product innovation analysis: {str(e)}")
+        result = {"error": str(e)}
     
     # Print the result
     if result:
         print(f"Product innovation analysis completed successfully.")
-        print(f"Found {len(result)} underpriced products:")
-        for product in result:
-            print(f"  {product.name} ({product.model}): {product.price}")
-            print(f"    Underpriced by: {product.price_value_assessment.underpriced_percentage:.2f}%")
-            print(f"    Assessment: {product.price_value_assessment.assessment}")
-            print()
+        
+        # Handle different result types
+        if isinstance(result, dict):
+            if "error" in result:
+                print(f"Error: {result['error']}")
+            elif "summary" in result and isinstance(result["summary"], str):
+                # Handle the case where summary is a string
+                print(result["summary"])
+            else:
+                # Handle the case where result is a dictionary with expected structure
+                summary = result.get("summary", {})
+                if isinstance(summary, dict):
+                    print(f"Total products analyzed: {summary.get('total_products_analyzed', 0)}")
+                    print(f"Underpriced products found: {summary.get('underpriced_products_count', 0)} ({summary.get('underpriced_products_percentage', 0):.2f}%)")
+                    print(f"Average underpriced percentage: {summary.get('average_underpriced_percentage', 0):.2f}%\n")
+                else:
+                    print(f"Summary: {summary}")
+                
+                # Print top underpriced products if available
+                if "top_underpriced_products" in result and result["top_underpriced_products"]:
+                    print("Top Underpriced Products:")
+                    for i, product in enumerate(result.get("top_underpriced_products", [])[:5], 1):
+                        print(f"{i}. {product.get('manufacturer', 'Unknown')} {product.get('name', 'Unknown')} {product.get('model', 'Unknown')}")
+                        print(f"   Category: {product.get('category', 'Unknown')}")
+                        print(f"   Underpriced by: {product.get('underpriced_percentage', 0):.2f}%")
+                        print(f"   Assessment: {product.get('assessment', 'No assessment available')[:100]}...\n")
+        elif isinstance(result, str):
+            # Handle the case where result is a string
+            print(result)
+        else:
+            # Handle unexpected result types
+            print(f"Unexpected result type: {type(result)}")
+            print(str(result))
     else:
         print("Product innovation analysis failed. Check the logs for details.")
 

@@ -162,14 +162,10 @@ class ProductInnovationAgent:
         self.llm_provider = llm_provider
         self.tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
         
-        # Initialize LLM
+        # Initialize LLM - use standard OpenAI API to avoid Azure-specific issues
         self.llm = ChatOpenAI(
             model=self.llm_model,
-            temperature=0.1,
-            model_kwargs={
-                "azure_deployment": os.getenv("AZURE_DEPLOYMENT_NAME", "gpt-4o"),
-                "azure_endpoint": os.getenv("AZURE_OPENAI_ENDPOINT", "https://phx-sales-ai.openai.azure.com/")
-            }
+            temperature=0.1
         )
         
         # Initialize memory for the LangGraph
@@ -272,6 +268,7 @@ class ProductInnovationAgent:
         # Extract parameters from state
         category = state.get("category", None)
         manufacturer = state.get("manufacturer", None)
+        model = state.get("model", None)
         
         # If no specific category or manufacturer is provided, use defaults
         categories_to_search = [category] if category else PRODUCT_CATEGORIES
@@ -324,6 +321,21 @@ class ProductInnovationAgent:
         
         # Deduplicate products based on name and model number
         unique_products = self._deduplicate_products(product_data)
+        
+        # Filter by model if specified
+        if model:
+            model_lower = model.lower()
+            filtered_products = []
+            for product in unique_products:
+                product_model = product.get("model_number", "").lower()
+                if model_lower in product_model:
+                    filtered_products.append(product)
+            
+            if filtered_products:
+                unique_products = filtered_products
+                logger.info(f"Filtered to {len(unique_products)} products matching model: {model}")
+            else:
+                logger.warning(f"No products found matching model: {model}")
         
         logger.info(f"Collected information on {len(unique_products)} unique products")
         
@@ -1025,7 +1037,7 @@ class ProductInnovationAgent:
         
         return insights
     
-    async def analyze_products(self, category: Optional[str] = None, manufacturer: Optional[str] = None) -> Dict[str, Any]:
+    async def analyze_products(self, category: Optional[str] = None, manufacturer: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
         """
         Analyze products to identify underpriced ones in the enterprise networking manufacturing space.
         
@@ -1035,27 +1047,35 @@ class ProductInnovationAgent:
         Args:
             category: Optional category to focus on (if None, all categories are analyzed)
             manufacturer: Optional manufacturer to focus on (if None, all manufacturers are analyzed)
+            model: Optional model number to focus on (if None, all models are analyzed)
             
         Returns:
             Dictionary with the analysis report
         """
-        logger.info(f"Starting product innovation analysis for category={category}, manufacturer={manufacturer}")
+        logger.info(f"Starting product innovation analysis for category={category}, manufacturer={manufacturer}, model={model}")
         
         # Initialize the state with input parameters
         initial_state = {
             "category": category,
-            "manufacturer": manufacturer
+            "manufacturer": manufacturer,
+            "model": model
         }
         
         # Run the workflow
         try:
             # Execute the graph
-            final_state = await self.graph.arun(initial_state)
+            final_state = await self.graph.ainvoke(initial_state)
             
             # Extract the report from the final state
             report = final_state.get("report", {})
             
             logger.info("Product innovation analysis completed successfully")
+            
+            # Ensure we always return a dictionary
+            if isinstance(report, str):
+                return {"summary": report}
+            elif not isinstance(report, dict):
+                return {"summary": f"Unexpected report type: {type(report)}", "report_data": str(report)}
             
             return report
         except Exception as e:
@@ -1071,13 +1091,14 @@ async def main():
         # Initialize the agent
         agent = ProductInnovationAgent()
         
-        # Get optional category and manufacturer from command line arguments
+        # Get optional category, manufacturer, and model from command line arguments
         import sys
         category = sys.argv[1] if len(sys.argv) > 1 else None
         manufacturer = sys.argv[2] if len(sys.argv) > 2 else None
+        model = sys.argv[3] if len(sys.argv) > 3 else None
         
         # Run the analysis
-        report = await agent.analyze_products(category, manufacturer)
+        report = await agent.analyze_products(category, manufacturer, model)
         
         # Print the report summary
         print("\n=== Product Innovation Analysis Report ===\n")
