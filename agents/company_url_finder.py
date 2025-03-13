@@ -48,7 +48,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.checkpoint.memory import MemorySaver
 
 # Import necessary functions from research_agent.py
-from research_agent import (
+from agents.research_agent import (
     process_url, 
     load_customer_data, 
     get_gcs_client, 
@@ -901,8 +901,33 @@ async def verify_savm_id_match(verified_url: str, savm_id: str, savm_name: str, 
         logger.warning(f"No matching company name found for '{company_name}'")
         return None, None
 
+class CompanyURLFinder:
+    """
+    Class for finding and verifying company URLs.
+    
+    This class provides methods for finding company URLs, verifying them with human input,
+    and generating research reports about the companies.
+    """
+    
+    def __init__(self):
+        """Initialize the CompanyURLFinder."""
+        # Initialize logger
+        self.logger = logger
+    
+    async def find_company_url(self, company_name: str) -> str:
+        """
+        Find the official website URL for a company.
+        
+        Args:
+            company_name (str): The name of the company to search for.
+            
+        Returns:
+            str: The official website URL of the company, or None if not found.
+        """
+        return await find_company_url(company_name)
+
 async def main():
-    """Main entry point for the company URL finder."""
+    """Main entry point for the company URL finder when run as a script."""
     try:
         # Get the company name from user input
         print("Enter the company name to search for: ")

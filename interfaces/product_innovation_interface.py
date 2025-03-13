@@ -18,7 +18,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # Import the ProductInnovationAgent
-from product_innovation_agent import ProductInnovationAgent, PRODUCT_CATEGORIES, TARGET_MANUFACTURERS
+from agents.product_innovation_agent import ProductInnovationAgent, PRODUCT_CATEGORIES, TARGET_MANUFACTURERS
 
 # Configure logging
 logging.basicConfig(

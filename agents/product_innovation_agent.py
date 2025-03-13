@@ -26,7 +26,11 @@ from datetime import datetime
 from urllib.parse import urlparse
 import uuid
 from dotenv import load_dotenv
-from cache_utils import cache_tavily_search, cache_llm_call, async_cache_with_ttl, CACHE_TTL_SEARCH, CACHE_TTL_LLM
+from utils.cache import cache_tavily_search, cache_llm_call, async_cache_with_ttl
+from config import settings
+# Get cache TTL values from settings
+CACHE_TTL_SEARCH = getattr(settings, 'CACHE_TTL_SEARCH', 3600)
+CACHE_TTL_LLM = getattr(settings, 'CACHE_TTL_LLM', 3600)
 
 # Configure logging
 logging.basicConfig(
